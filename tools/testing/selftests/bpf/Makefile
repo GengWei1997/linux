@@ -109,6 +109,7 @@ TEST_PROGS := test_kmod.sh \
 	test_xdping.sh \
 	test_bpftool_build.sh \
 	test_bpftool.sh \
+	test_bpftool_map.sh \
 	test_bpftool_metadata.sh \
 	test_doc_build.sh \
 	test_xsk.sh \
@@ -136,7 +137,7 @@ TEST_GEN_PROGS_EXTENDED = \
 	xdping \
 	xskxceiver
 
-TEST_GEN_FILES += liburandom_read.so urandom_read sign-file uprobe_multi
+TEST_GEN_FILES += $(TEST_KMODS) liburandom_read.so urandom_read sign-file uprobe_multi
 
 ifneq ($(V),1)
 submake_extras := feature_display=0
@@ -397,7 +398,7 @@ $(HOST_BPFOBJ): $(wildcard $(BPFDIR)/*.[ch] $(BPFDIR)/Makefile)		       \
 		    DESTDIR=$(HOST_SCRATCH_DIR)/ prefix= all install_headers
 endif
 
-# vmlinux.h is first dumped to a temprorary file and then compared to
+# vmlinux.h is first dumped to a temporary file and then compared to
 # the previous version. This helps to avoid unnecessary re-builds of
 # $(TRUNNER_BPF_OBJS)
 $(INCLUDE_DIR)/vmlinux.h: $(VMLINUX_BTF) $(BPFTOOL) | $(INCLUDE_DIR)
@@ -840,6 +841,11 @@ $(OUTPUT)/bench: $(OUTPUT)/bench.o \
 	$(call msg,BINARY,,$@)
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(filter %.a %.o,$^) $(LDLIBS) -o $@
 
+# This works around GCC warning about snprintf truncating strings like:
+#
+#   char a[PATH_MAX], b[PATH_MAX];
+#   snprintf(a, "%s/foo", b);      // triggers -Wformat-truncation
+$(OUTPUT)/veristat.o: CFLAGS += -Wno-format-truncation
 $(OUTPUT)/veristat.o: $(BPFOBJ)
 $(OUTPUT)/veristat: $(OUTPUT)/veristat.o
 	$(call msg,BINARY,,$@)

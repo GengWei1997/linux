@@ -956,9 +956,8 @@ new_cluster:
 	}
 
 	/*
-	 * We don't have free cluster but have some clusters in
-	 * discarding, do discard now and reclaim them, then
-	 * reread cluster_next_cpu since we dropped si->lock
+	 * We don't have free cluster but have some clusters in discarding,
+	 * do discard now and reclaim them.
 	 */
 	if ((si->flags & SWP_PAGE_DISCARD) && swap_do_scheduled_discard(si))
 		goto new_cluster;
@@ -2244,6 +2243,8 @@ static int unuse_mm(struct mm_struct *mm, unsigned int type)
 	VMA_ITERATOR(vmi, mm, 0);
 
 	mmap_read_lock(mm);
+	if (check_stable_address_space(mm))
+		goto unlock;
 	for_each_vma(vmi, vma) {
 		if (vma->anon_vma && !is_vm_hugetlb_page(vma)) {
 			ret = unuse_vma(vma, type);
@@ -2253,6 +2254,7 @@ static int unuse_mm(struct mm_struct *mm, unsigned int type)
 
 		cond_resched();
 	}
+unlock:
 	mmap_read_unlock(mm);
 	return ret;
 }

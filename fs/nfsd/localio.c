@@ -32,7 +32,7 @@
  * @rpc_clnt: rpc_clnt that the client established
  * @cred: cred that the client established
  * @nfs_fh: filehandle to lookup
- * @nfp: place to find the nfsd_file, or store it if it was non-NULL
+ * @pnf: place to find the nfsd_file, or store it if it was non-NULL
  * @fmode: fmode_t to use for open
  *
  * This function maps a local fh to a path on a local filesystem.
@@ -117,6 +117,16 @@ nfsd_open_local_fh(struct net *net, struct auth_domain *dom,
 	return localio;
 }
 
+static void nfsd_file_dio_alignment(struct nfsd_file *nf,
+				    u32 *nf_dio_mem_align,
+				    u32 *nf_dio_offset_align,
+				    u32 *nf_dio_read_offset_align)
+{
+	*nf_dio_mem_align = nf->nf_dio_mem_align;
+	*nf_dio_offset_align = nf->nf_dio_offset_align;
+	*nf_dio_read_offset_align = nf->nf_dio_read_offset_align;
+}
+
 static const struct nfsd_localio_operations nfsd_localio_ops = {
 	.nfsd_net_try_get  = nfsd_net_try_get,
 	.nfsd_net_put  = nfsd_net_put,
@@ -124,6 +134,7 @@ static const struct nfsd_localio_operations nfsd_localio_ops = {
 	.nfsd_file_put_local = nfsd_file_put_local,
 	.nfsd_file_get_local = nfsd_file_get_local,
 	.nfsd_file_file = nfsd_file_file,
+	.nfsd_file_dio_alignment = nfsd_file_dio_alignment,
 };
 
 void nfsd_localio_ops_init(void)

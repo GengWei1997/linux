@@ -116,10 +116,11 @@ enum blk_integrity_checksum {
 struct blk_integrity {
 	unsigned char				flags;
 	enum blk_integrity_checksum		csum_type;
-	unsigned char				tuple_size;
+	unsigned char				metadata_size;
 	unsigned char				pi_offset;
 	unsigned char				interval_exp;
 	unsigned char				tag_size;
+	unsigned char				pi_tuple_size;
 };
 
 typedef unsigned int __bitwise blk_mode_t;
@@ -388,6 +389,9 @@ struct queue_limits {
 	unsigned int		max_user_discard_sectors;
 	unsigned int		max_secure_erase_sectors;
 	unsigned int		max_write_zeroes_sectors;
+	unsigned int		max_wzeroes_unmap_sectors;
+	unsigned int		max_hw_wzeroes_unmap_sectors;
+	unsigned int		max_user_wzeroes_unmap_sectors;
 	unsigned int		max_hw_zone_append_sectors;
 	unsigned int		max_zone_append_sectors;
 	unsigned int		discard_granularity;
@@ -995,6 +999,8 @@ extern int blk_register_queue(struct gendisk *disk);
 extern void blk_unregister_queue(struct gendisk *disk);
 void submit_bio_noacct(struct bio *bio);
 struct bio *bio_split_to_limits(struct bio *bio);
+struct bio *bio_submit_split_bioset(struct bio *bio, unsigned int split_sectors,
+				    struct bio_set *bs);
 
 extern int blk_lld_busy(struct request_queue *q);
 extern int blk_queue_enter(struct request_queue *q, blk_mq_req_flags_t flags);
@@ -1103,6 +1109,7 @@ static inline void blk_queue_disable_secure_erase(struct request_queue *q)
 static inline void blk_queue_disable_write_zeroes(struct request_queue *q)
 {
 	q->limits.max_write_zeroes_sectors = 0;
+	q->limits.max_wzeroes_unmap_sectors = 0;
 }
 
 /*
@@ -1281,15 +1288,6 @@ enum blk_default_limits {
 	BLK_SEG_BOUNDARY_MASK	= 0xFFFFFFFFUL,
 };
 
-/*
- * Default upper limit for the software max_sectors limit used for
- * regular file system I/O.  This can be increased through sysfs.
- *
- * Not to be confused with the max_hw_sector limit that is entirely
- * controlled by the driver, usually based on hardware limits.
- */
-#define BLK_DEF_MAX_SECTORS_CAP	2560u
-
 static inline struct queue_limits *bdev_limits(struct block_device *bdev)
 {
 	return &bdev_get_queue(bdev)->limits;
@@ -1437,6 +1435,12 @@ bdev_max_secure_erase_sectors(struct block_device *bdev)
 static inline unsigned int bdev_write_zeroes_sectors(struct block_device *bdev)
 {
 	return bdev_limits(bdev)->max_write_zeroes_sectors;
+}
+
+static inline unsigned int
+bdev_write_zeroes_unmap_sectors(struct block_device *bdev)
+{
+	return bdev_limits(bdev)->max_wzeroes_unmap_sectors;
 }
 
 static inline bool bdev_nonrot(struct block_device *bdev)

@@ -855,7 +855,10 @@ static int z_erofs_pcluster_begin(struct z_erofs_frontend *fe)
 		/* bind cache first when cached decompression is preferred */
 		z_erofs_bind_cache(fe);
 	} else {
-		erofs_init_metabuf(&map->buf, sb);
+		ret = erofs_init_metabuf(&map->buf, sb,
+					 erofs_inode_in_metabox(fe->inode));
+		if (ret)
+			return ret;
 		ptr = erofs_bread(&map->buf, map->m_pa, false);
 		if (IS_ERR(ptr)) {
 			ret = PTR_ERR(ptr);
@@ -1832,7 +1835,7 @@ static void z_erofs_pcluster_readmore(struct z_erofs_frontend *f,
 		map->m_la = end;
 		err = z_erofs_map_blocks_iter(inode, map,
 					      EROFS_GET_BLOCKS_READMORE);
-		if (err)
+		if (err || !(map->m_flags & EROFS_MAP_ENCODED))
 			return;
 
 		/* expand ra for the trailing edge if readahead */
@@ -1844,7 +1847,7 @@ static void z_erofs_pcluster_readmore(struct z_erofs_frontend *f,
 		end = round_up(end, PAGE_SIZE);
 	} else {
 		end = round_up(map->m_la, PAGE_SIZE);
-		if (!map->m_llen)
+		if (!(map->m_flags & EROFS_MAP_ENCODED) || !map->m_llen)
 			return;
 	}
 

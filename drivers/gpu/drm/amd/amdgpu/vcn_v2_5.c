@@ -102,6 +102,7 @@ static int vcn_v2_5_pause_dpg_mode(struct amdgpu_vcn_inst *vinst,
 				   struct dpg_pause_state *new_state);
 static int vcn_v2_5_sriov_start(struct amdgpu_device *adev);
 static void vcn_v2_5_set_ras_funcs(struct amdgpu_device *adev);
+static int vcn_v2_5_reset(struct amdgpu_vcn_inst *vinst);
 
 static int amdgpu_ih_clientid_vcns[] = {
 	SOC15_IH_CLIENTID_VCN,
@@ -115,7 +116,6 @@ static void vcn_v2_5_idle_work_handler(struct work_struct *work)
 	struct amdgpu_device *adev = vcn_inst->adev;
 	unsigned int fences = 0, fence[AMDGPU_MAX_VCN_INSTANCES] = {0};
 	unsigned int i, j;
-	int r = 0;
 
 	for (i = 0; i < adev->vcn.num_vcn_inst; ++i) {
 		struct amdgpu_vcn_inst *v = &adev->vcn.inst[i];
@@ -148,15 +148,7 @@ static void vcn_v2_5_idle_work_handler(struct work_struct *work)
 	if (!fences && !atomic_read(&adev->vcn.inst[0].total_submission_cnt)) {
 		amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_VCN,
 						       AMD_PG_STATE_GATE);
-		mutex_lock(&adev->vcn.workload_profile_mutex);
-		if (adev->vcn.workload_profile_active) {
-			r = amdgpu_dpm_switch_power_profile(adev, PP_SMC_POWER_PROFILE_VIDEO,
-							    false);
-			if (r)
-				dev_warn(adev->dev, "(%d) failed to disable video power profile mode\n", r);
-			adev->vcn.workload_profile_active = false;
-		}
-		mutex_unlock(&adev->vcn.workload_profile_mutex);
+		amdgpu_vcn_put_profile(adev);
 	} else {
 		schedule_delayed_work(&adev->vcn.inst[0].idle_work, VCN_IDLE_TIMEOUT);
 	}
@@ -166,7 +158,6 @@ static void vcn_v2_5_ring_begin_use(struct amdgpu_ring *ring)
 {
 	struct amdgpu_device *adev = ring->adev;
 	struct amdgpu_vcn_inst *v = &adev->vcn.inst[ring->me];
-	int r = 0;
 
 	atomic_inc(&adev->vcn.inst[0].total_submission_cnt);
 
@@ -176,20 +167,6 @@ static void vcn_v2_5_ring_begin_use(struct amdgpu_ring *ring)
 	 * the delayed work so there is no one else to set it to false
 	 * and we don't care if someone else sets it to true.
 	 */
-	if (adev->vcn.workload_profile_active)
-		goto pg_lock;
-
-	mutex_lock(&adev->vcn.workload_profile_mutex);
-	if (!adev->vcn.workload_profile_active) {
-		r = amdgpu_dpm_switch_power_profile(adev, PP_SMC_POWER_PROFILE_VIDEO,
-						    true);
-		if (r)
-			dev_warn(adev->dev, "(%d) failed to switch to video power profile mode\n", r);
-		adev->vcn.workload_profile_active = true;
-	}
-	mutex_unlock(&adev->vcn.workload_profile_mutex);
-
-pg_lock:
 	mutex_lock(&adev->vcn.inst[0].vcn_pg_lock);
 	amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_VCN,
 					       AMD_PG_STATE_UNGATE);
@@ -217,6 +194,7 @@ pg_lock:
 		v->pause_dpg_mode(v, &new_state);
 	}
 	mutex_unlock(&adev->vcn.inst[0].vcn_pg_lock);
+	amdgpu_vcn_get_profile(adev);
 }
 
 static void vcn_v2_5_ring_end_use(struct amdgpu_ring *ring)
@@ -404,7 +382,13 @@ static int vcn_v2_5_sw_init(struct amdgpu_ip_block *ip_block)
 
 		if (adev->pg_flags & AMD_PG_SUPPORT_VCN_DPG)
 			adev->vcn.inst[j].pause_dpg_mode = vcn_v2_5_pause_dpg_mode;
+		adev->vcn.inst[j].reset = vcn_v2_5_reset;
 	}
+
+	adev->vcn.supported_reset =
+		amdgpu_get_soft_full_reset_mask(&adev->vcn.inst[0].ring_enc[0]);
+	if (!amdgpu_sriov_vf(adev))
+		adev->vcn.supported_reset |= AMDGPU_RESET_TYPE_PER_QUEUE;
 
 	if (amdgpu_sriov_vf(adev)) {
 		r = amdgpu_virt_alloc_mm_table(adev);
@@ -424,6 +408,10 @@ static int vcn_v2_5_sw_init(struct amdgpu_ip_block *ip_block)
 	} else {
 		adev->vcn.ip_dump = ptr;
 	}
+
+	r = amdgpu_vcn_sysfs_reset_mask_init(adev);
+	if (r)
+		return r;
 
 	return 0;
 }
@@ -454,6 +442,8 @@ static int vcn_v2_5_sw_fini(struct amdgpu_ip_block *ip_block)
 
 	if (amdgpu_sriov_vf(adev))
 		amdgpu_virt_free_mm_table(adev);
+
+	amdgpu_vcn_sysfs_reset_mask_fini(adev);
 
 	for (i = 0; i < adev->vcn.num_vcn_inst; i++) {
 		r = amdgpu_vcn_suspend(adev, i);
@@ -1816,6 +1806,7 @@ static const struct amdgpu_ring_funcs vcn_v2_5_dec_ring_vm_funcs = {
 	.emit_wreg = vcn_v2_0_dec_ring_emit_wreg,
 	.emit_reg_wait = vcn_v2_0_dec_ring_emit_reg_wait,
 	.emit_reg_write_reg_wait = amdgpu_ring_emit_reg_write_reg_wait_helper,
+	.reset = amdgpu_vcn_ring_reset,
 };
 
 /**
@@ -1914,6 +1905,7 @@ static const struct amdgpu_ring_funcs vcn_v2_5_enc_ring_vm_funcs = {
 	.emit_wreg = vcn_v2_0_enc_ring_emit_wreg,
 	.emit_reg_wait = vcn_v2_0_enc_ring_emit_reg_wait,
 	.emit_reg_write_reg_wait = amdgpu_ring_emit_reg_write_reg_wait_helper,
+	.reset = amdgpu_vcn_ring_reset,
 };
 
 static void vcn_v2_5_set_dec_ring_funcs(struct amdgpu_device *adev)
@@ -1940,6 +1932,16 @@ static void vcn_v2_5_set_enc_ring_funcs(struct amdgpu_device *adev)
 			adev->vcn.inst[j].ring_enc[i].me = j;
 		}
 	}
+}
+
+static int vcn_v2_5_reset(struct amdgpu_vcn_inst *vinst)
+{
+	int r;
+
+	r = vcn_v2_5_stop(vinst);
+	if (r)
+		return r;
+	return vcn_v2_5_start(vinst);
 }
 
 static bool vcn_v2_5_is_idle(struct amdgpu_ip_block *ip_block)

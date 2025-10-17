@@ -49,11 +49,6 @@ struct nfs_local_fsync_ctx {
 static bool localio_enabled __read_mostly = true;
 module_param(localio_enabled, bool, 0644);
 
-static bool localio_O_DIRECT_semantics __read_mostly = false;
-module_param(localio_O_DIRECT_semantics, bool, 0644);
-MODULE_PARM_DESC(localio_O_DIRECT_semantics,
-		 "LOCALIO will use O_DIRECT semantics to filesystem.");
-
 static inline bool nfs_client_is_local(const struct nfs_client *clp)
 {
 	return !!rcu_access_pointer(clp->cl_uuid.net);
@@ -180,10 +175,8 @@ static void nfs_local_probe(struct nfs_client *clp)
 		return;
 	}
 
-	if (nfs_client_is_local(clp)) {
-		/* If already enabled, disable and re-enable */
-		nfs_localio_disable_client(clp);
-	}
+	if (nfs_client_is_local(clp))
+		return;
 
 	if (!nfs_uuid_begin(&clp->cl_uuid))
 		return;
@@ -244,7 +237,8 @@ __nfs_local_open_fh(struct nfs_client *clp, const struct cred *cred,
 		case -ENOMEM:
 		case -ENXIO:
 		case -ENOENT:
-			/* Revalidate localio, will disable if unsupported */
+			/* Revalidate localio */
+			nfs_localio_disable_client(clp);
 			nfs_local_probe(clp);
 		}
 	}
@@ -322,12 +316,9 @@ nfs_local_iocb_alloc(struct nfs_pgio_header *hdr,
 		return NULL;
 	}
 
-	if (localio_O_DIRECT_semantics &&
-	    test_bit(NFS_IOHDR_ODIRECT, &hdr->flags)) {
-		iocb->kiocb.ki_filp = file;
+	init_sync_kiocb(&iocb->kiocb, file);
+	if (test_bit(NFS_IOHDR_ODIRECT, &hdr->flags))
 		iocb->kiocb.ki_flags = IOCB_DIRECT;
-	} else
-		init_sync_kiocb(&iocb->kiocb, file);
 
 	iocb->kiocb.ki_pos = hdr->args.offset;
 	iocb->hdr = hdr;
@@ -335,6 +326,30 @@ nfs_local_iocb_alloc(struct nfs_pgio_header *hdr,
 	iocb->aio_complete_work = NULL;
 
 	return iocb;
+}
+
+static bool nfs_iov_iter_aligned_bvec(const struct iov_iter *i,
+		loff_t offset, unsigned int addr_mask, unsigned int len_mask)
+{
+	const struct bio_vec *bvec = i->bvec;
+	size_t skip = i->iov_offset;
+	size_t size = i->count;
+
+	if ((offset | size) & len_mask)
+		return false;
+	do {
+		size_t len = bvec->bv_len;
+
+		if (len > size)
+			len = size;
+		if ((unsigned long)(bvec->bv_offset + skip) & addr_mask)
+			return false;
+		bvec++;
+		size -= len;
+		skip = 0;
+	} while (size);
+
+	return true;
 }
 
 static void
@@ -346,6 +361,25 @@ nfs_local_iter_init(struct iov_iter *i, struct nfs_local_kiocb *iocb, int dir)
 		      hdr->args.count + hdr->args.pgbase);
 	if (hdr->args.pgbase != 0)
 		iov_iter_advance(i, hdr->args.pgbase);
+
+	if (iocb->kiocb.ki_flags & IOCB_DIRECT) {
+		u32 nf_dio_mem_align, nf_dio_offset_align, nf_dio_read_offset_align;
+		/* Verify the IO is DIO-aligned as required */
+		nfs_to->nfsd_file_dio_alignment(iocb->localio, &nf_dio_mem_align,
+						&nf_dio_offset_align,
+						&nf_dio_read_offset_align);
+		if (dir == READ)
+			nf_dio_offset_align = nf_dio_read_offset_align;
+
+		if (nf_dio_mem_align && nf_dio_offset_align &&
+		    nfs_iov_iter_aligned_bvec(i, hdr->args.offset,
+					      nf_dio_mem_align - 1,
+					      nf_dio_offset_align - 1))
+			return; /* is DIO-aligned */
+
+		/* Fallback to using buffered for this misaligned IO */
+		iocb->kiocb.ki_flags &= ~IOCB_DIRECT;
+	}
 }
 
 static void
@@ -405,6 +439,11 @@ nfs_local_read_done(struct nfs_local_kiocb *iocb, long status)
 {
 	struct nfs_pgio_header *hdr = iocb->hdr;
 	struct file *filp = iocb->kiocb.ki_filp;
+
+	if ((iocb->kiocb.ki_flags & IOCB_DIRECT) && status == -EINVAL) {
+		/* Underlying FS will return -EINVAL if misaligned DIO is attempted. */
+		pr_info_ratelimited("nfs: Unexpected direct I/O read alignment failure\n");
+	}
 
 	nfs_local_pgio_done(hdr, status);
 
@@ -501,14 +540,13 @@ nfs_copy_boot_verifier(struct nfs_write_verifier *verifier, struct inode *inode)
 {
 	struct nfs_client *clp = NFS_SERVER(inode)->nfs_client;
 	u32 *verf = (u32 *)verifier->data;
-	int seq = 0;
+	unsigned int seq;
 
 	do {
-		read_seqbegin_or_lock(&clp->cl_boot_lock, &seq);
+		seq = read_seqbegin(&clp->cl_boot_lock);
 		verf[0] = (u32)clp->cl_nfssvc_boot.tv_sec;
 		verf[1] = (u32)clp->cl_nfssvc_boot.tv_nsec;
-	} while (need_seqretry(&clp->cl_boot_lock, seq));
-	done_seqretry(&clp->cl_boot_lock, seq);
+	} while (read_seqretry(&clp->cl_boot_lock, seq));
 }
 
 static void
@@ -598,6 +636,11 @@ nfs_local_write_done(struct nfs_local_kiocb *iocb, long status)
 	struct inode *inode = hdr->inode;
 
 	dprintk("%s: wrote %ld bytes.\n", __func__, status > 0 ? status : 0);
+
+	if ((iocb->kiocb.ki_flags & IOCB_DIRECT) && status == -EINVAL) {
+		/* Underlying FS will return -EINVAL if misaligned DIO is attempted. */
+		pr_info_ratelimited("nfs: Unexpected direct I/O write alignment failure\n");
+	}
 
 	/* Handle short writes as if they are ENOSPC */
 	if (status > 0 && status < hdr->args.count) {

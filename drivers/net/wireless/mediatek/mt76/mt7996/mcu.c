@@ -899,17 +899,28 @@ mt7996_mcu_bss_txcmd_tlv(struct sk_buff *skb, bool en)
 }
 
 static void
-mt7996_mcu_bss_mld_tlv(struct sk_buff *skb, struct mt76_vif_link *mlink)
+mt7996_mcu_bss_mld_tlv(struct sk_buff *skb,
+		       struct ieee80211_bss_conf *link_conf,
+		       struct mt7996_vif_link *link)
 {
+	struct ieee80211_vif *vif = link_conf->vif;
+	struct mt7996_vif *mvif = (struct mt7996_vif *)vif->drv_priv;
 	struct bss_mld_tlv *mld;
 	struct tlv *tlv;
 
 	tlv = mt7996_mcu_add_uni_tlv(skb, UNI_BSS_INFO_MLD, sizeof(*mld));
-
 	mld = (struct bss_mld_tlv *)tlv;
-	mld->group_mld_id = 0xff;
-	mld->own_mld_id = mlink->idx;
-	mld->remap_idx = 0xff;
+	mld->own_mld_id = link->mld_idx;
+	mld->link_id = link_conf->link_id;
+
+	if (ieee80211_vif_is_mld(vif)) {
+		mld->group_mld_id = mvif->mld_group_idx;
+		mld->remap_idx = mvif->mld_remap_idx;
+		memcpy(mld->mac_addr, vif->addr, ETH_ALEN);
+	} else {
+		mld->group_mld_id = 0xff;
+		mld->remap_idx = 0xff;
+	}
 }
 
 static void
@@ -1108,6 +1119,8 @@ int mt7996_mcu_add_bss_info(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 		goto out;
 
 	if (enable) {
+		struct mt7996_vif_link *link;
+
 		mt7996_mcu_bss_rfch_tlv(skb, phy);
 		mt7996_mcu_bss_bmc_tlv(skb, mlink, phy);
 		mt7996_mcu_bss_ra_tlv(skb, phy);
@@ -1118,7 +1131,8 @@ int mt7996_mcu_add_bss_info(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 			mt7996_mcu_bss_he_tlv(skb, vif, link_conf, phy);
 
 		/* this tag is necessary no matter if the vif is MLD */
-		mt7996_mcu_bss_mld_tlv(skb, mlink);
+		link = container_of(mlink, struct mt7996_vif_link, mt76);
+		mt7996_mcu_bss_mld_tlv(skb, link_conf, link);
 	}
 
 	mt7996_mcu_bss_mbssid_tlv(skb, link_conf, enable);
@@ -1149,9 +1163,8 @@ int mt7996_mcu_set_timing(struct mt7996_phy *phy, struct ieee80211_vif *vif,
 static int
 mt7996_mcu_sta_ba(struct mt7996_dev *dev, struct mt76_vif_link *mvif,
 		  struct ieee80211_ampdu_params *params,
-		  bool enable, bool tx)
+		  struct mt76_wcid *wcid, bool enable, bool tx)
 {
-	struct mt76_wcid *wcid = (struct mt76_wcid *)params->sta->drv_priv;
 	struct sta_rec_ba_uni *ba;
 	struct sk_buff *skb;
 	struct tlv *tlv;
@@ -1185,14 +1198,17 @@ int mt7996_mcu_add_tx_ba(struct mt7996_dev *dev,
 	if (enable && !params->amsdu)
 		msta_link->wcid.amsdu = false;
 
-	return mt7996_mcu_sta_ba(dev, &link->mt76, params, enable, true);
+	return mt7996_mcu_sta_ba(dev, &link->mt76, params, &msta_link->wcid,
+				 enable, true);
 }
 
 int mt7996_mcu_add_rx_ba(struct mt7996_dev *dev,
 			 struct ieee80211_ampdu_params *params,
-			 struct mt7996_vif_link *link, bool enable)
+			 struct mt7996_vif_link *link,
+			 struct mt7996_sta_link *msta_link, bool enable)
 {
-	return mt7996_mcu_sta_ba(dev, &link->mt76, params, enable, false);
+	return mt7996_mcu_sta_ba(dev, &link->mt76, params, &msta_link->wcid,
+				 enable, false);
 }
 
 static void
@@ -2299,15 +2315,15 @@ mt7996_mcu_add_group(struct mt7996_dev *dev, struct ieee80211_vif *vif,
 
 static void
 mt7996_mcu_sta_mld_setup_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
+			     struct ieee80211_vif *vif,
 			     struct ieee80211_sta *sta)
 {
 	struct mt7996_sta *msta = (struct mt7996_sta *)sta->drv_priv;
-	unsigned long links = sta->valid_links;
-	unsigned int nlinks = hweight16(links);
+	unsigned int nlinks = hweight16(sta->valid_links);
 	struct mld_setup_link *mld_setup_link;
+	struct ieee80211_link_sta *link_sta;
 	struct sta_rec_mld_setup *mld_setup;
 	struct mt7996_sta_link *msta_link;
-	struct ieee80211_vif *vif;
 	unsigned int link_id;
 	struct tlv *tlv;
 
@@ -2325,7 +2341,7 @@ mt7996_mcu_sta_mld_setup_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 	mld_setup->primary_id = cpu_to_le16(msta_link->wcid.idx);
 
 	if (nlinks > 1) {
-		link_id = __ffs(links & ~BIT(msta->deflink_id));
+		link_id = __ffs(sta->valid_links & ~BIT(msta->deflink_id));
 		msta_link = mt76_dereference(msta->link[link_id], &dev->mt76);
 		if (!msta_link)
 			return;
@@ -2333,9 +2349,8 @@ mt7996_mcu_sta_mld_setup_tlv(struct mt7996_dev *dev, struct sk_buff *skb,
 	mld_setup->seconed_id = cpu_to_le16(msta_link->wcid.idx);
 	mld_setup->link_num = nlinks;
 
-	vif = container_of((void *)msta->vif, struct ieee80211_vif, drv_priv);
 	mld_setup_link = (struct mld_setup_link *)mld_setup->link_info;
-	for_each_set_bit(link_id, &links, IEEE80211_MLD_MAX_NUM_LINKS) {
+	for_each_sta_active_link(vif, sta, link_sta, link_id) {
 		struct mt7996_vif_link *link;
 
 		msta_link = mt76_dereference(msta->link[link_id], &dev->mt76);
@@ -2427,7 +2442,8 @@ int mt7996_mcu_add_sta(struct mt7996_dev *dev,
 		mt7996_mcu_sta_muru_tlv(dev, skb, link_conf, link_sta);
 
 		if (sta->mlo) {
-			mt7996_mcu_sta_mld_setup_tlv(dev, skb, sta);
+			mt7996_mcu_sta_mld_setup_tlv(dev, skb, link_conf->vif,
+						     sta);
 			mt7996_mcu_sta_eht_mld_tlv(dev, skb, sta);
 		}
 	}
