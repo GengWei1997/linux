@@ -159,8 +159,8 @@
 
 	mtp_batterydata: qcom,battery-data {
 		qcom,batt-id-range-pct = <15>;
-		#include "batterydata-F11-sun-4000mah.dtsi"
-		#include "batterydata-F11-gyu-4000mah.dtsi"
+		#include "sm8150-xiaomi-batterydata-F11-sun-4000mah.dtsi"
+		#include "sm8150-xiaomi-batterydata-F11-gyu-4000mah.dtsi"
 	};
 
 	disp_vci_vreg: disp_vci_vreg {
