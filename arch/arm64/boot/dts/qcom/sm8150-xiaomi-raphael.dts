@@ -13,13 +13,14 @@
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <dt-bindings/sound/qcom,q6asm.h>
+#include <dt-bindings/usb/pd.h>
 #include "sm8150.dtsi"
 #include "sm8150-wcd9340.dtsi"
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
 #include "pm8150l.dtsi"
 
-/*
+/* 
  * Rewrite reserved memory maps inherited from sm8150.dtsi to match the ones
  * used on xiaomi-raphael.
  * Note: this list is ordered by its memory address in sm8150.dtsi.
@@ -46,24 +47,6 @@
 		serial0 = &uart2;
 		hsuart0 = &uart13;
 		wifi0 = &wifi;
-	};
-
-	chosen {
-		#address-cells = <2>;
-		#size-cells = <2>;
-		ranges;
-
-		framebuffer: framebuffer@9c000000 {
-			compatible = "simple-framebuffer";
-			reg = <0 0x9c000000 0 0x2400000>;
-			status = "disabled";
-			width = <1080>;
-			height = <2340>;
-			stride = <(1080 * 4)>;
-			format = "a8r8g8b8";
-			clocks = <&gcc GCC_DISP_HF_AXI_CLK>,
-				 <&gcc GCC_DISP_SF_AXI_CLK>;
-		};
 	};
 
 	gpio_keys {
@@ -132,11 +115,6 @@
 			reg = <0x0 0x99100000 0x0 0x1400000>;
 		};
 
-		cont_splash_mem: memory@9c000000 {
-			reg = <0x0 0x9c000000 0x0 0x2400000>;
-			no-map;
-		};
-
 		cdsp_sec_mem: memory@a4c00000 {
 			reg = <0x0 0xa4c00000 0x0 0x3c00000>;
 			no-map;
@@ -164,11 +142,25 @@
 	};
 
 	battery: battery {
-		compatible = "simple-battery";
-		charge-full-design-microamp-hours = <4000000>;
-		energy-full-design-microwatt-hours = <12300000>;
-		voltage-min-design-microvolt = <3400000>;
-		voltage-max-design-microvolt = <4400000>;
+    compatible = "simple-battery";
+    charge-full-design-microamp-hours = <4000000>;
+    energy-full-design-microwatt-hours = <12300000>;
+    voltage-min-design-microvolt = <3400000>;
+    voltage-max-design-microvolt = <4400000>;
+    charge-empty-microamp-hours = <0>;
+    charge-full-microamp-hours = <4000000>;
+    charge-cycle-count = <0>;
+    present = <1>;
+    status = "Unknown";
+    health = "Good";
+    technology = "Li-ion";
+	qcom,battery-data = <&mtp_batterydata>;
+	};
+
+	mtp_batterydata: qcom,battery-data {
+		qcom,batt-id-range-pct = <15>;
+		#include "batterydata-F11-sun-4000mah.dtsi"
+		#include "batterydata-F11-gyu-4000mah.dtsi"
 	};
 
 	disp_vci_vreg: disp_vci_vreg {
@@ -517,13 +509,13 @@
 		interrupt-parent = <&tlmm>;
 		interrupts = <122 0x2800>;
 		vtouch-load = <600000>;
-		pinctrl-names = "pmx_ts_active","pmx_ts_suspend";
-		pinctrl-0 = <&tp_active>;
-		pinctrl-1 = <&tp_int_suspend &tp_reset_suspend>;
-		goodix,reset-gpio = <&tlmm 54 0x0>;
-		goodix,irq-gpio = <&tlmm 122 0x2800>;
-		goodix,vdd-gpio = <&tlmm 98 0x0>;			/* 3v3 */
-		goodix,avdd-gpio = <&tlmm 100 0x0>;			/* 1v8 */
+		pinctrl-names = "default", "sleep";
+		pinctrl-0 = <&ts_int_active &ts_reset_active>;
+		pinctrl-1 = <&ts_int_suspend &ts_reset_suspend>;
+		goodix,reset-gpio = <&tlmm 54 GPIO_ACTIVE_HIGH>;
+		goodix,irq-gpio = <&tlmm 122 IRQ_TYPE_EDGE_RISING>;
+		goodix,vdd-gpio = <&tlmm 98 GPIO_ACTIVE_HIGH>;			/* 3v3 */
+		goodix,avdd-gpio = <&tlmm 100 GPIO_ACTIVE_HIGH>;			/* 1v8 */
 		goodix,irq-flags = <2>; /* 1:trigger rising, 2:trigger falling;*/
 		goodix,panel-max-id = <10>;
 		goodix,panel-max-x = <1079>;
@@ -574,22 +566,21 @@
 	};
 };
 
+&mdss {
+	status = "okay";
+};
+
 &mdss_dsi0 {
 	vdda-supply = <&vreg_l3c_1p2>;
 	status = "okay";
 	panel@0 {
 		compatible = "ss,ea8076-global";
 		reg = <0>;
-		status = "okay";
 
 		vddio-supply = <&vreg_l14a_1p88>;
 		vcie-supply = <&disp_vci_vreg>;
 		vci-supply = <&vreg_l13a_2p7>;
 		reset-gpios = <&tlmm 6 GPIO_ACTIVE_LOW>;
-
-		pinctrl-names = "panel_active", "panel_suspend";
-		pinctrl-0 = <&sde_dsi_active &sde_te_active>;
-		pinctrl-1 = <&sde_dsi_suspend &sde_te_suspend>;
 
 		port {
 			panel_in: endpoint {
@@ -607,10 +598,6 @@
 &mdss_dsi0_phy {
 	status = "okay";
 	vdds-supply = <&vreg_l5a_0p875>;
-};
-
-&mdss {
-	status = "okay";
 };
 
 &q6afedai {
@@ -657,6 +644,11 @@
 	status = "okay";
 };
 
+&pm8150b_charger {
+	status = "okay";
+	monitored-battery = <&battery>;
+};
+
 &pm8150_gpios {
 	vol_up_pin_a: vol-up-active {
 		pins = "gpio6";
@@ -667,9 +659,38 @@
 	};
 };
 
+&pm8150_rtc {
+	nvmem-cells = <&rtc_offset>;
+	nvmem-cell-names = "offset";
+	status = "okay";
+};
+
+&pm8150_sdam_2 {
+	status = "okay";
+	rtc_offset: rtc-offset@bc {
+		reg = <0xbc 0x4>;
+	};
+};
+
 &pm8150b_fg {
 	status = "okay";
+	qcom,rapid-soc-dec-en;
+	qcom,fg-sys-term-current = <(-300)>;
+	qcom,fg-cutoff-voltage = <3400>;
+	qcom,fg-cutoff-current = <200>;
+	qcom,fg-empty-voltage = <3100>;
+	qcom,fg-batt-temp-delta = <6>;
+	qcom,fg-force-load-profile;
+	qcom,five-pin-battery;
+	/* ESR fast calibration */
+	qcom,fg-esr-timer-chg-fast = <0 7>;
+	qcom,fg-esr-timer-dischg-fast = <0 7>;
+	qcom,fg-esr-timer-chg-slow = <0 96>;
+	qcom,fg-esr-timer-dischg-slow = <0 96>;
+	qcom,fg-esr-cal-soc-thresh = <26 230>;
+	qcom,fg-esr-cal-temp-thresh = <10 40>;
 	monitored-battery = <&battery>;
+	power-supplies = <&pm8150b_charger>;
 };
 
 &pm8150l_flash {
@@ -692,6 +713,49 @@
 		flash-max-timeout-us = <1280000>;
 	};
 
+};
+
+&pm8150b_typec {
+	vdd-pdphy-supply = <&vreg_l2a_3p1>;
+	status = "okay";
+
+	connector {
+		compatible = "usb-c-connector";
+
+		power-role = "dual";
+		data-role = "dual";
+		self-powered;
+
+		source-pdos = <PDO_FIXED(5000, 3000,
+					 PDO_FIXED_DUAL_ROLE |
+					 PDO_FIXED_USB_COMM |
+					 PDO_FIXED_DATA_SWAP)>;
+
+		sink-pdos = <PDO_FIXED(5000, 3000,
+					 PDO_FIXED_DUAL_ROLE |
+					 PDO_FIXED_USB_COMM |
+					 PDO_FIXED_DATA_SWAP)
+					 PDO_VAR(5000, 12000, 3000)>;
+
+		op-sink-microwatt = <10000000>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				pm8150b_role_switch_in: endpoint {
+					remote-endpoint = <&usb_1_dwc3_hs>;
+				};
+			};
+		};
+	};
+};
+
+&pm8150b_vbus {
+	status = "okay";
 };
 
 &pon_pwrkey {
@@ -729,23 +793,6 @@
 		&quat_mi2s_sd0_active>;
 	pinctrl-names = "default";
 	model = "Xiaomi Mi 9T Pro";
-
-	/*audio-routing = //downstream
-		"AIF4 VI", "MCLK",
-		"RX_BIAS", "MCLK",
-		"MADINPUT", "MCLK",
-		"hifi amp", "LINEOUT1",
-		"hifi amp", "LINEOUT2",
-		"AMIC2", "MIC BIAS2",
-		"MIC BIAS2", "Headset Mic",
-		"AMIC3", "MIC BIAS3",
-		"MIC BIAS3", "ANCRight Headset Mic",
-		"AMIC1", "MIC BIAS1",
-		"MIC BIAS1", "ANCLeft Headset Mic",
-		"AMIC4", "MIC BIAS1",
-		"MIC BIAS1", "ANCRight Headset Mic",
-		"AMIC5", "MIC BIAS4",
-		"MIC BIAS4", "Analog Mic5";*/
 
 	audio-routing =	"RX_BIAS", "MCLK",
 		"AMIC1", "MIC BIAS1",
@@ -917,34 +964,6 @@
 		};
 	};
 
-	sde_dsi_active: sde_dsi_active {
-		pins = "gpio6", "gpio7", "gpio5";
-		function = "gpio";
-		drive-strength = <8>;
-		bias-disable;
-	};
-
-	sde_dsi_suspend: sde_dsi_suspend {
-		pins = "gpio6", "gpio7", "gpio5";
-		function = "gpio";
-		drive-strength = <2>;
-		bias-pull-down;
-	};
-
-	sde_te_active: sde_te_active {
-		pins = "gpio8";
-		function = "mdp_vsync";
-		drive-strength = <2>;
-		bias-pull-down;
-	};
-
-	sde_te_suspend: sde_te_suspend {
-		pins = "gpio8";
-		function = "mdp_vsync";
-		drive-strength = <2>;
-		bias-pull-down;
-	};
-
 	smartpa_int_active: smartpa_int_active {
 		pins = "gpio141";
 		function = "gpio";
@@ -979,14 +998,14 @@
 		output-low;
 	};
 
-	tp_active: tp_active {
-		pins = "gpio122", "gpio54";
+	ts_int_active: ts-int-active {
+		pins = "gpio122";
 		function = "gpio";
 		drive-strength = <16>;
 		bias-pull-up;
 	};
 
-	tp_int_suspend: tp_int_suspend {
+	ts_int_suspend: ts-int-suspend {
 		pins = "gpio122";
 		function = "gpio";
 		drive-strength = <16>;
@@ -995,7 +1014,14 @@
 		bias-pull-up = <00>;
 	};
 
-	tp_reset_suspend: tp_reset_suspend {
+	ts_reset_active: ts-reset-active {
+		pins = "gpio54";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-pull-up;
+	};
+
+	ts_reset_suspend: ts-reset-suspend {
 		pins = "gpio54";
 		function = "gpio";
 		drive-strength = <16>;
@@ -1020,21 +1046,20 @@
 	pinctrl-1 = <&qup_uart13_sleep>;
 
 	bluetooth: bluetooth {
-		compatible = "qcom,wcn3998-bt";
+		compatible = "qcom,wcn3990-bt";
 		vddio-supply = <&vreg_l1a_0p75>;
 		vddxo-supply = <&vreg_l7a_1p8>;
 		vddrf-supply = <&vreg_l2c_1p3>;
 		vddch0-supply = <&vreg_l11c_3p3>;
 		max-speed = <3200000>;
-		firmware-name = "raphael/crnv21.bin";
 	};
 };
 
-&ufs_mem_hc {
+&ufs_mem_phy {
 	status = "okay";
 };
 
-&ufs_mem_phy {
+&ufs_mem_hc {
 	status = "okay";
 };
 
@@ -1045,11 +1070,16 @@
 };
 
 &usb_1_dwc3 {
-	dr_mode = "peripheral";
+	dr_mode = "otg";
 	maximum-speed = "high-speed";
 	/* Remove USB3 phy */
 	phys = <&usb_1_hsphy>;
 	phy-names = "usb2-phy";
+	usb-role-switch;
+};
+
+&usb_1_dwc3_hs {
+	remote-endpoint = <&pm8150b_role_switch_in>;
 };
 
 &usb_1_hsphy {
@@ -1059,6 +1089,28 @@
 	vdda33-supply = <&vreg_l2a_3p1>;
 };
 
+&usb_2 {
+	/* USB 2.0 only */
+	qcom,select-utmi-as-pipe-clk;
+	status = "okay";
+};
+
+&usb_2_hsphy {
+	vdda-pll-supply = <&vreg_l5a_0p875>;
+	vdda18-supply = <&vreg_l12a_1p8>;
+	vdda33-supply = <&vreg_l2a_3p1>;
+	status = "okay";
+};
+
+&usb_2_dwc3 {
+	dr_mode = "host";
+	maximum-speed = "high-speed";
+	/* Remove USB3 phy */
+	phys = <&usb_2_hsphy>;
+	phy-names = "usb2-phy";
+};
+
+
 &wcd9340 {
 	reset-gpios = <&tlmm 143 GPIO_ACTIVE_HIGH>;
 	vdd-buck-sido-supply = <&vreg_s4a_1p8>;
@@ -1067,15 +1119,15 @@
 	vdd-rx-supply = <&vreg_s4a_1p8>;
 	vdd-io-supply = <&vreg_s4a_1p8>;
 
-	qcom,micbias1-microvolt = <2700000>;
-	qcom,micbias2-microvolt = <1800000>;
-	qcom,micbias3-microvolt = <2700000>;
-	qcom,micbias4-microvolt = <2700000>;
+	qcom,micbias1-microvolt = <1800000>;
+	qcom,micbias2-microvolt = <2750000>;
+	qcom,micbias3-microvolt = <1800000>;
+	qcom,micbias4-microvolt = <1800000>;
 
-	//qcom,hphl-jack-type-normally-open;
-	//qcom,ground-jack-type-normally-open;
-	//qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
-	qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
+	qcom,hphl-jack-type-normally-open;
+	qcom,ground-jack-type-normally-open;
+	qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
+	qcom,mbhc-headset-vthreshold-microvolt = <2600000>;
 	qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
 };
 
