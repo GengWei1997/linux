@@ -165,7 +165,7 @@ static int qcom_fg_write(struct qcom_fg_chip *chip, u8 *val, u16 addr, int len)
  * @param val Pointer to write values from
  * @param addr Address to write to
  * @param len Number of registers (bytes) to write
- * @return int 0 on success, negative errno on error
+ * @return int 0 on 取success, negative errno on error
  */
 static int qcom_fg_masked_write(struct qcom_fg_chip *chip, u16 addr, u8 mask, u8 val)
 {
@@ -1069,7 +1069,7 @@ static int qcom_fg_clear_ima(struct qcom_fg_chip *chip,
 	return 0;
 }
 
-irqreturn_t qcom_fg_handle_soc_delta(int irq, void *data)
+static irqreturn_t qcom_fg_handle_soc_delta(int irq, void *data)
 {
 	struct qcom_fg_chip *chip = data;
 
@@ -1080,7 +1080,7 @@ irqreturn_t qcom_fg_handle_soc_delta(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-irqreturn_t qcom_fg_handle_mem_avail(int irq, void *data)
+static irqreturn_t qcom_fg_handle_mem_avail(int irq, void *data)
 {
 	struct qcom_fg_chip *chip = data;
 
@@ -1157,6 +1157,9 @@ static int qcom_fg_probe(struct platform_device *pdev)
 	chip->dev = &pdev->dev;
 	chip->ops = of_device_get_match_data(&pdev->dev);
 
+	dev_info(chip->dev, "Probing qcom-fg driver\n");
+	dev_info(chip->dev, "Base address: 0x%x\n", chip->base);
+	dev_info(chip->dev, "Battery info: %p\n", chip->batt_info);
 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chip->regmap) {
 		dev_err(chip->dev, "Failed to locate the regmap\n");
@@ -1207,7 +1210,7 @@ static int qcom_fg_probe(struct platform_device *pdev)
 	}
 
 	supply_config.drv_data = chip;
-	supply_config.of_node = pdev->dev.of_node;
+	supply_config.fwnode = pdev->dev.fwnode;
 
 	chip->batt_psy = devm_power_supply_register(chip->dev,
 			&batt_psy_desc, &supply_config);
@@ -1310,8 +1313,7 @@ static int qcom_fg_probe(struct platform_device *pdev)
 	}
 
 	/* Optional: Get charger power supply for status checking */
-	chip->chg_psy = power_supply_get_by_phandle(chip->dev->of_node,
-							"power-supplies");
+	chip->chg_psy = power_supply_get_by_name("power-supplies");
 	if (IS_ERR(chip->chg_psy)) {
 		ret = PTR_ERR(chip->chg_psy);
 		dev_warn(chip->dev, "Failed to get charger supply: %d\n", ret);
