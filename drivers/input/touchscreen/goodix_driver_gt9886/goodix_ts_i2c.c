@@ -351,16 +351,26 @@ static int goodix_parse_customize_params(struct goodix_ts_device *dev,
 #endif
 
 #ifdef CONFIG_ACPI
-static int goodix_parse_acpi(struct acpi_device *dev,
+static int goodix_parse_acpi(struct device *dev,
 		struct goodix_ts_board_data *bdata)
 {
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	if (!adev) {
+		ts_err("No ACPI companion for device");
+		return -ENODEV;
+	}
 	return 0;
 }
 
-static int goodix_parse_acpi_cfg(struct acpi_device *dev,
+static int goodix_parse_acpi_cfg(struct device *dev,
 		char *cfg_type, struct goodix_ts_config *config,
 		unsigned int sensor_id)
 {
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	if (!adev) {
+		ts_err("No ACPI companion for device");
+		return -ENODEV;
+	}
 	return 0;
 }
 #endif
