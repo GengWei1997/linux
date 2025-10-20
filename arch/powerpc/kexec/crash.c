@@ -350,13 +350,16 @@ EXPORT_SYMBOL(crash_shutdown_unregister);
 
 void default_machine_crash_shutdown(struct pt_regs *regs)
 {
-	unsigned int i;
+	volatile unsigned int i;
 	int (*old_handler)(struct pt_regs *regs);
 
 	if (TRAP(regs) == INTERRUPT_SYSTEM_RESET)
 		is_via_system_reset = 1;
 
-	crash_smp_send_stop();
+	if (IS_ENABLED(CONFIG_SMP))
+		crash_smp_send_stop();
+	else
+		crash_kexec_prepare();
 
 	crash_save_cpu(regs, crashing_cpu);
 

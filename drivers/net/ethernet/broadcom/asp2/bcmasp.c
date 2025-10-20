@@ -528,8 +528,8 @@ void bcmasp_netfilt_suspend(struct bcmasp_intf *intf)
 				  ASP_RX_FILTER_BLK_CTRL);
 }
 
-void bcmasp_netfilt_get_all_active(struct bcmasp_intf *intf, u32 *rule_locs,
-				   u32 *rule_cnt)
+int bcmasp_netfilt_get_all_active(struct bcmasp_intf *intf, u32 *rule_locs,
+				  u32 *rule_cnt)
 {
 	struct bcmasp_priv *priv = intf->parent;
 	int j = 0, i;
@@ -544,10 +544,15 @@ void bcmasp_netfilt_get_all_active(struct bcmasp_intf *intf, u32 *rule_locs,
 		    priv->net_filters[i - 1].wake_filter)
 			continue;
 
+		if (j == *rule_cnt)
+			return -EMSGSIZE;
+
 		rule_locs[j++] = priv->net_filters[i].fs.location;
 	}
 
 	*rule_cnt = j;
+
+	return 0;
 }
 
 int bcmasp_netfilt_get_active(struct bcmasp_intf *intf)
@@ -1300,6 +1305,8 @@ static int bcmasp_probe(struct platform_device *pdev)
 		if (!intf) {
 			dev_err(dev, "Cannot create eth interface %d\n", i);
 			bcmasp_remove_intfs(priv);
+			of_node_put(intf_node);
+			ret = -ENOMEM;
 			goto of_put_exit;
 		}
 		list_add_tail(&intf->list, &priv->intfs);

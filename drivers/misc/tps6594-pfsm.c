@@ -260,14 +260,16 @@ static int tps6594_pfsm_probe(struct platform_device *pdev)
 	pfsm->miscdev.minor = MISC_DYNAMIC_MINOR;
 	pfsm->miscdev.name = devm_kasprintf(dev, GFP_KERNEL, "pfsm-%ld-0x%02x",
 					    tps->chip_id, tps->reg);
+	if (!pfsm->miscdev.name)
+		return -ENOMEM;
+
 	pfsm->miscdev.fops = &tps6594_pfsm_fops;
 	pfsm->miscdev.parent = dev->parent;
 
 	for (i = 0 ; i < pdev->num_resources ; i++) {
 		irq = platform_get_irq_byname(pdev, pdev->resource[i].name);
 		if (irq < 0)
-			return dev_err_probe(dev, irq, "Failed to get %s irq\n",
-					     pdev->resource[i].name);
+			return irq;
 
 		ret = devm_request_threaded_irq(dev, irq, NULL,
 						tps6594_pfsm_isr, IRQF_ONESHOT,
@@ -281,13 +283,11 @@ static int tps6594_pfsm_probe(struct platform_device *pdev)
 	return misc_register(&pfsm->miscdev);
 }
 
-static int tps6594_pfsm_remove(struct platform_device *pdev)
+static void tps6594_pfsm_remove(struct platform_device *pdev)
 {
 	struct tps6594_pfsm *pfsm = platform_get_drvdata(pdev);
 
 	misc_deregister(&pfsm->miscdev);
-
-	return 0;
 }
 
 static struct platform_driver tps6594_pfsm_driver = {
@@ -295,7 +295,7 @@ static struct platform_driver tps6594_pfsm_driver = {
 		.name = "tps6594-pfsm",
 	},
 	.probe = tps6594_pfsm_probe,
-	.remove = tps6594_pfsm_remove,
+	.remove_new = tps6594_pfsm_remove,
 };
 
 module_platform_driver(tps6594_pfsm_driver);

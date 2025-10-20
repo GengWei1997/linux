@@ -206,7 +206,7 @@ static void *xas_descend(struct xa_state *xas, struct xa_node *node)
 	void *entry = xa_entry(xas->xa, node, offset);
 
 	xas->xa_node = node;
-	if (xa_is_sibling(entry)) {
+	while (xa_is_sibling(entry)) {
 		offset = xa_to_sibling(entry);
 		entry = xa_entry(xas->xa, node, offset);
 		if (node->shift && xa_is_node(entry))
@@ -1750,6 +1750,36 @@ unlock:
 EXPORT_SYMBOL(xa_store_range);
 
 /**
+ * xas_get_order() - Get the order of an entry.
+ * @xas: XArray operation state.
+ *
+ * Called after xas_load, the xas should not be in an error state.
+ *
+ * Return: A number between 0 and 63 indicating the order of the entry.
+ */
+int xas_get_order(struct xa_state *xas)
+{
+	int order = 0;
+
+	if (!xas->xa_node)
+		return 0;
+
+	for (;;) {
+		unsigned int slot = xas->xa_offset + (1 << order);
+
+		if (slot >= XA_CHUNK_SIZE)
+			break;
+		if (!xa_is_sibling(xa_entry(xas->xa, xas->xa_node, slot)))
+			break;
+		order++;
+	}
+
+	order += xas->xa_node->shift;
+	return order;
+}
+EXPORT_SYMBOL_GPL(xas_get_order);
+
+/**
  * xa_get_order() - Get the order of an entry.
  * @xa: XArray.
  * @index: Index of the entry.
@@ -1759,30 +1789,13 @@ EXPORT_SYMBOL(xa_store_range);
 int xa_get_order(struct xarray *xa, unsigned long index)
 {
 	XA_STATE(xas, xa, index);
-	void *entry;
 	int order = 0;
+	void *entry;
 
 	rcu_read_lock();
 	entry = xas_load(&xas);
-
-	if (!entry)
-		goto unlock;
-
-	if (!xas.xa_node)
-		goto unlock;
-
-	for (;;) {
-		unsigned int slot = xas.xa_offset + (1 << order);
-
-		if (slot >= XA_CHUNK_SIZE)
-			break;
-		if (!xa_is_sibling(xas.xa_node->slots[slot]))
-			break;
-		order++;
-	}
-
-	order += xas.xa_node->shift;
-unlock:
+	if (entry)
+		order = xas_get_order(&xas);
 	rcu_read_unlock();
 
 	return order;
@@ -1801,6 +1814,9 @@ EXPORT_SYMBOL(xa_get_order);
  * Finds an empty entry in @xa between @limit.min and @limit.max,
  * stores the index into the @id pointer, then stores the entry at
  * that index.  A concurrent lookup will not see an uninitialised @id.
+ *
+ * Must only be operated on an xarray initialized with flag XA_FLAGS_ALLOC set
+ * in xa_init_flags().
  *
  * Context: Any context.  Expects xa_lock to be held on entry.  May
  * release and reacquire xa_lock if @gfp flags permit.
@@ -1849,6 +1865,9 @@ EXPORT_SYMBOL(__xa_alloc);
  * that index.  A concurrent lookup will not see an uninitialised @id.
  * The search for an empty entry will start at @next and will wrap
  * around if necessary.
+ *
+ * Must only be operated on an xarray initialized with flag XA_FLAGS_ALLOC set
+ * in xa_init_flags().
  *
  * Context: Any context.  Expects xa_lock to be held on entry.  May
  * release and reacquire xa_lock if @gfp flags permit.

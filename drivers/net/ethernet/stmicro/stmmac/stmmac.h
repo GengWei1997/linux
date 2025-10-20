@@ -78,7 +78,6 @@ struct stmmac_tx_queue {
 	dma_addr_t dma_tx_phy;
 	dma_addr_t tx_tail_addr;
 	u32 mss;
-	struct stmmac_txq_stats txq_stats;
 };
 
 struct stmmac_rx_buffer {
@@ -123,7 +122,6 @@ struct stmmac_rx_queue {
 		unsigned int len;
 		unsigned int error;
 	} state;
-	struct stmmac_rxq_stats rxq_stats;
 };
 
 struct stmmac_channel {
@@ -250,6 +248,8 @@ struct stmmac_priv {
 	struct stmmac_extra_stats xstats ____cacheline_aligned_in_smp;
 	struct stmmac_safety_stats sstats;
 	struct plat_stmmacenet_data *plat;
+	/* Protect est parameters */
+	struct mutex est_lock;
 	struct dma_features dma_cap;
 	struct stmmac_counters mmc;
 	int hw_cap_support;
@@ -257,6 +257,7 @@ struct stmmac_priv {
 	u32 msg_enable;
 	int wolopts;
 	int wol_irq;
+	bool wol_irq_disabled;
 	int clk_csr;
 	struct timer_list eee_ctrl_timer;
 	int lpi_irq;

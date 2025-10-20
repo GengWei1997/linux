@@ -183,13 +183,13 @@ static int gfs2_writepages(struct address_space *mapping,
 	int ret;
 
 	/*
-	 * Even if we didn't write any pages here, we might still be holding
+	 * Even if we didn't write enough pages here, we might still be holding
 	 * dirty pages in the ail. We forcibly flush the ail because we don't
 	 * want balance_dirty_pages() to loop indefinitely trying to write out
 	 * pages held in the ail that it can't find.
 	 */
 	ret = iomap_writepages(mapping, wbc, &wpc, &gfs2_writeback_ops);
-	if (ret == 0)
+	if (ret == 0 && wbc->nr_to_write > 0)
 		set_bit(SDF_FORCE_AIL_FLUSH, &sdp->sd_flags);
 	return ret;
 }
@@ -272,8 +272,7 @@ continue_unlock:
 				 * not be suitable for data integrity
 				 * writeout).
 				 */
-				*done_index = folio->index +
-					folio_nr_pages(folio);
+				*done_index = folio_next_index(folio);
 				ret = 1;
 				break;
 			}
@@ -465,7 +464,7 @@ static int gfs2_read_folio(struct file *file, struct folio *folio)
 		error = mpage_read_folio(folio, gfs2_block_map);
 	}
 
-	if (unlikely(gfs2_withdrawn(sdp)))
+	if (gfs2_withdrawing_or_withdrawn(sdp))
 		return -EIO;
 
 	return error;
@@ -480,31 +479,29 @@ static int gfs2_read_folio(struct file *file, struct folio *folio)
  *
  */
 
-int gfs2_internal_read(struct gfs2_inode *ip, char *buf, loff_t *pos,
-                       unsigned size)
+ssize_t gfs2_internal_read(struct gfs2_inode *ip, char *buf, loff_t *pos,
+			   size_t size)
 {
 	struct address_space *mapping = ip->i_inode.i_mapping;
 	unsigned long index = *pos >> PAGE_SHIFT;
-	unsigned offset = *pos & (PAGE_SIZE - 1);
-	unsigned copied = 0;
-	unsigned amt;
-	struct page *page;
+	size_t copied = 0;
 
 	do {
-		page = read_cache_page(mapping, index, gfs2_read_folio, NULL);
-		if (IS_ERR(page)) {
-			if (PTR_ERR(page) == -EINTR)
+		size_t offset, chunk;
+		struct folio *folio;
+
+		folio = read_cache_folio(mapping, index, gfs2_read_folio, NULL);
+		if (IS_ERR(folio)) {
+			if (PTR_ERR(folio) == -EINTR)
 				continue;
-			return PTR_ERR(page);
+			return PTR_ERR(folio);
 		}
-		amt = size - copied;
-		if (offset + size > PAGE_SIZE)
-			amt = PAGE_SIZE - offset;
-		memcpy_from_page(buf + copied, page, offset, amt);
-		put_page(page);
-		copied += amt;
-		index++;
-		offset = 0;
+		offset = *pos + copied - folio_pos(folio);
+		chunk = min(size - copied, folio_size(folio) - offset);
+		memcpy_from_folio(buf + copied, folio, offset, chunk);
+		index = folio_next_index(folio);
+		folio_put(folio);
+		copied += chunk;
 	} while(copied < size);
 	(*pos) += size;
 	return size;

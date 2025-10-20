@@ -16,12 +16,9 @@
 #include <linux/debugfs.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/device.h>
 #include <linux/io.h>
-#include <linux/of_irq.h>
-#include <linux/of_address.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <soc/tegra/fuse.h>
@@ -187,6 +184,8 @@ static void tegra234_cbb_fault_enable(struct tegra_cbb *cbb)
 static void tegra234_cbb_error_clear(struct tegra_cbb *cbb)
 {
 	struct tegra234_cbb *priv = to_tegra234_cbb(cbb);
+
+	writel(0, priv->mon + FABRIC_MN_MASTER_ERR_FORCE_0);
 
 	writel(0x3f, priv->mon + FABRIC_MN_MASTER_ERR_STATUS_0);
 	dsb(sy);

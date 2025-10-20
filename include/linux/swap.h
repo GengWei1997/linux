@@ -375,6 +375,16 @@ void folio_add_lru_vma(struct folio *, struct vm_area_struct *);
 void mark_page_accessed(struct page *);
 void folio_mark_accessed(struct folio *);
 
+static inline bool folio_may_be_lru_cached(struct folio *folio)
+{
+	/*
+	 * Holding PMD-sized folios in per-CPU LRU cache unbalances accounting.
+	 * Holding small numbers of low-order mTHP folios in per-CPU LRU cache
+	 * will be sensible, but nobody has implemented and tested that yet.
+	 */
+	return !folio_test_large(folio);
+}
+
 extern atomic_t lru_disable_count;
 
 static inline bool lru_cache_disabled(void)
@@ -548,6 +558,11 @@ static inline void swap_shmem_alloc(swp_entry_t swp)
 }
 
 static inline int swap_duplicate(swp_entry_t swp)
+{
+	return 0;
+}
+
+static inline int swapcache_prepare(swp_entry_t swp)
 {
 	return 0;
 }

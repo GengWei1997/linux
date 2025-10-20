@@ -909,7 +909,7 @@ static const struct reg_default rx_defaults[] = {
 	{ CDC_RX_BCL_VBAT_PK_EST2, 0x01 },
 	{ CDC_RX_BCL_VBAT_PK_EST3, 0x40 },
 	{ CDC_RX_BCL_VBAT_RF_PROC1, 0x2A },
-	{ CDC_RX_BCL_VBAT_RF_PROC1, 0x00 },
+	{ CDC_RX_BCL_VBAT_RF_PROC2, 0x00 },
 	{ CDC_RX_BCL_VBAT_TAC1, 0x00 },
 	{ CDC_RX_BCL_VBAT_TAC2, 0x18 },
 	{ CDC_RX_BCL_VBAT_TAC3, 0x18 },
@@ -3537,25 +3537,25 @@ static int rx_macro_probe(struct platform_device *pdev)
 
 	rx->macro = devm_clk_get_optional(dev, "macro");
 	if (IS_ERR(rx->macro))
-		return PTR_ERR(rx->macro);
+		return dev_err_probe(dev, PTR_ERR(rx->macro), "unable to get macro clock\n");
 
 	rx->dcodec = devm_clk_get_optional(dev, "dcodec");
 	if (IS_ERR(rx->dcodec))
-		return PTR_ERR(rx->dcodec);
+		return dev_err_probe(dev, PTR_ERR(rx->dcodec), "unable to get dcodec clock\n");
 
 	rx->mclk = devm_clk_get(dev, "mclk");
 	if (IS_ERR(rx->mclk))
-		return PTR_ERR(rx->mclk);
+		return dev_err_probe(dev, PTR_ERR(rx->mclk), "unable to get mclk clock\n");
 
 	if (flags & LPASS_MACRO_FLAG_HAS_NPL_CLOCK) {
 		rx->npl = devm_clk_get(dev, "npl");
 		if (IS_ERR(rx->npl))
-			return PTR_ERR(rx->npl);
+			return dev_err_probe(dev, PTR_ERR(rx->npl), "unable to get npl clock\n");
 	}
 
 	rx->fsgen = devm_clk_get(dev, "fsgen");
 	if (IS_ERR(rx->fsgen))
-		return PTR_ERR(rx->fsgen);
+		return dev_err_probe(dev, PTR_ERR(rx->fsgen), "unable to get fsgen clock\n");
 
 	rx->pds = lpass_macro_pds_init(dev);
 	if (IS_ERR(rx->pds))

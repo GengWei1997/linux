@@ -331,14 +331,16 @@ static noinline void do_fault_error(struct pt_regs *regs, vm_fault_t fault)
 				do_no_context(regs, fault);
 			else
 				do_sigsegv(regs, SEGV_MAPERR);
-		} else if (fault & VM_FAULT_SIGBUS) {
+		} else if (fault & (VM_FAULT_SIGBUS | VM_FAULT_HWPOISON)) {
 			/* Kernel mode? Handle exceptions or die */
 			if (!user_mode(regs))
 				do_no_context(regs, fault);
 			else
 				do_sigbus(regs);
-		} else
+		} else {
+			pr_emerg("Unexpected fault flags: %08x\n", fault);
 			BUG();
+		}
 		break;
 	}
 }
@@ -598,7 +600,7 @@ void do_secure_storage_access(struct pt_regs *regs)
 	 * reliable without the misc UV feature so we need to check
 	 * for that as well.
 	 */
-	if (test_bit_inv(BIT_UV_FEAT_MISC, &uv_info.uv_feature_indications) &&
+	if (uv_has_feature(BIT_UV_FEAT_MISC) &&
 	    !test_bit_inv(61, &regs->int_parm_long)) {
 		/*
 		 * When this happens, userspace did something that it

@@ -837,6 +837,9 @@ static void dwc3_meson_g12a_remove(struct platform_device *pdev)
 
 	usb_role_switch_unregister(priv->role_switch);
 
+	put_device(priv->switch_desc.udc);
+	put_device(priv->switch_desc.usb2_port);
+
 	of_platform_depopulate(dev);
 
 	for (i = 0 ; i < PHY_COUNT ; ++i) {
@@ -922,6 +925,12 @@ static int __maybe_unused dwc3_meson_g12a_resume(struct device *dev)
 
 	if (priv->vbus && priv->otg_phy_mode == PHY_MODE_USB_HOST) {
 		ret = regulator_enable(priv->vbus);
+		if (ret)
+			return ret;
+	}
+
+	if (priv->drvdata->usb_post_init) {
+		ret = priv->drvdata->usb_post_init(priv);
 		if (ret)
 			return ret;
 	}

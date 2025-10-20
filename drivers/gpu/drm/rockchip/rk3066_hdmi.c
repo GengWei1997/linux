@@ -17,7 +17,6 @@
 #include "rk3066_hdmi.h"
 
 #include "rockchip_drm_drv.h"
-#include "rockchip_drm_vop.h"
 
 #define DEFAULT_PLLA_RATE 30000000
 
@@ -858,11 +857,9 @@ static int rk3066_hdmi_probe(struct platform_device *pdev)
 	return component_add(&pdev->dev, &rk3066_hdmi_ops);
 }
 
-static int rk3066_hdmi_remove(struct platform_device *pdev)
+static void rk3066_hdmi_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &rk3066_hdmi_ops);
-
-	return 0;
 }
 
 static const struct of_device_id rk3066_hdmi_dt_ids[] = {
@@ -873,7 +870,7 @@ MODULE_DEVICE_TABLE(of, rk3066_hdmi_dt_ids);
 
 struct platform_driver rk3066_hdmi_driver = {
 	.probe  = rk3066_hdmi_probe,
-	.remove = rk3066_hdmi_remove,
+	.remove_new = rk3066_hdmi_remove,
 	.driver = {
 		.name = "rockchip-rk3066-hdmi",
 		.of_match_table = rk3066_hdmi_dt_ids,

@@ -147,6 +147,7 @@ static union acpi_object *amdgpu_atif_call(struct amdgpu_atif *atif,
 					   struct acpi_buffer *params)
 {
 	acpi_status status;
+	union acpi_object *obj;
 	union acpi_object atif_arg_elements[2];
 	struct acpi_object_list atif_arg;
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
@@ -169,16 +170,24 @@ static union acpi_object *amdgpu_atif_call(struct amdgpu_atif *atif,
 
 	status = acpi_evaluate_object(atif->handle, NULL, &atif_arg,
 				      &buffer);
+	obj = (union acpi_object *)buffer.pointer;
 
-	/* Fail only if calling the method fails and ATIF is supported */
-	if (ACPI_FAILURE(status) && status != AE_NOT_FOUND) {
+	/* Fail if calling the method fails */
+	if (ACPI_FAILURE(status)) {
 		DRM_DEBUG_DRIVER("failed to evaluate ATIF got %s\n",
 				 acpi_format_exception(status));
-		kfree(buffer.pointer);
+		kfree(obj);
 		return NULL;
 	}
 
-	return buffer.pointer;
+	if (obj->type != ACPI_TYPE_BUFFER) {
+		DRM_DEBUG_DRIVER("bad object returned from ATIF: %d\n",
+				 obj->type);
+		kfree(obj);
+		return NULL;
+	}
+
+	return obj;
 }
 
 /**
@@ -706,7 +715,7 @@ int amdgpu_acpi_pcie_performance_request(struct amdgpu_device *adev,
 
 	atcs_input.size = sizeof(struct atcs_pref_req_input);
 	/* client id (bit 2-0: func num, 7-3: dev num, 15-8: bus num) */
-	atcs_input.client_id = adev->pdev->devfn | (adev->pdev->bus->number << 8);
+	atcs_input.client_id = pci_dev_id(adev->pdev);
 	atcs_input.valid_flags_mask = ATCS_VALID_FLAGS_MASK;
 	atcs_input.flags = ATCS_WAIT_FOR_COMPLETION;
 	if (advertise)
@@ -776,7 +785,7 @@ int amdgpu_acpi_power_shift_control(struct amdgpu_device *adev,
 
 	atcs_input.size = sizeof(struct atcs_pwr_shift_input);
 	/* dGPU id (bit 2-0: func num, 7-3: dev num, 15-8: bus num) */
-	atcs_input.dgpu_id = adev->pdev->devfn | (adev->pdev->bus->number << 8);
+	atcs_input.dgpu_id = pci_dev_id(adev->pdev);
 	atcs_input.dev_acpi_state = dev_state;
 	atcs_input.drv_state = drv_state;
 
@@ -789,6 +798,7 @@ int amdgpu_acpi_power_shift_control(struct amdgpu_device *adev,
 		return -EIO;
 	}
 
+	kfree(info);
 	return 0;
 }
 
@@ -868,7 +878,7 @@ static struct amdgpu_numa_info *amdgpu_acpi_get_numa_info(uint32_t pxm)
 	if (!numa_info) {
 		struct sysinfo info;
 
-		numa_info = kzalloc(sizeof *numa_info, GFP_KERNEL);
+		numa_info = kzalloc(sizeof(*numa_info), GFP_KERNEL);
 		if (!numa_info)
 			return NULL;
 
@@ -1141,7 +1151,7 @@ int amdgpu_acpi_get_tmr_info(struct amdgpu_device *adev, u64 *tmr_offset,
 	if (!tmr_offset || !tmr_size)
 		return -EINVAL;
 
-	bdf = (adev->pdev->bus->number << 8) | adev->pdev->devfn;
+	bdf = pci_dev_id(adev->pdev);
 	dev_info = amdgpu_acpi_get_dev(bdf);
 	if (!dev_info)
 		return -ENOENT;
@@ -1162,7 +1172,7 @@ int amdgpu_acpi_get_mem_info(struct amdgpu_device *adev, int xcc_id,
 	if (!numa_info)
 		return -EINVAL;
 
-	bdf = (adev->pdev->bus->number << 8) | adev->pdev->devfn;
+	bdf = pci_dev_id(adev->pdev);
 	dev_info = amdgpu_acpi_get_dev(bdf);
 	if (!dev_info)
 		return -ENOENT;

@@ -569,7 +569,7 @@
 							<20000000>;
 			};
 
-			esdhc0: esdhc@400b1000 {
+			esdhc0: mmc@400b1000 {
 				compatible = "fsl,imx53-esdhc";
 				reg = <0x400b1000 0x1000>;
 				interrupts = <27 IRQ_TYPE_LEVEL_HIGH>;
@@ -580,7 +580,7 @@
 				status = "disabled";
 			};
 
-			esdhc1: esdhc@400b2000 {
+			esdhc1: mmc@400b2000 {
 				compatible = "fsl,imx53-esdhc";
 				reg = <0x400b2000 0x1000>;
 				interrupts = <28 IRQ_TYPE_LEVEL_HIGH>;
@@ -612,7 +612,7 @@
 
 			ftm: ftm@400b8000 {
 				compatible = "fsl,ftm-timer";
-				reg = <0x400b8000 0x1000 0x400b9000 0x1000>;
+				reg = <0x400b8000 0x1000>, <0x400b9000 0x1000>;
 				interrupts = <44 IRQ_TYPE_LEVEL_HIGH>;
 				clock-names = "ftm-evt", "ftm-src",
 					"ftm-evt-counter-en", "ftm-src-counter-en";

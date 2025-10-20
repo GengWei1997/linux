@@ -41,8 +41,7 @@ int pci_iov_vf_id(struct pci_dev *dev)
 		return -EINVAL;
 
 	pf = pci_physfn(dev);
-	return (((dev->bus->number << 8) + dev->devfn) -
-		((pf->bus->number << 8) + pf->devfn + pf->sriov->offset)) /
+	return (pci_dev_id(dev) - (pci_dev_id(pf) + pf->sriov->offset)) /
 	       pf->sriov->stride;
 }
 EXPORT_SYMBOL_GPL(pci_iov_vf_id);
@@ -582,15 +581,18 @@ static int sriov_add_vfs(struct pci_dev *dev, u16 num_vfs)
 	if (dev->no_vf_scan)
 		return 0;
 
+	pci_lock_rescan_remove();
 	for (i = 0; i < num_vfs; i++) {
 		rc = pci_iov_add_virtfn(dev, i);
 		if (rc)
 			goto failed;
 	}
+	pci_unlock_rescan_remove();
 	return 0;
 failed:
 	while (i--)
 		pci_iov_remove_virtfn(dev, i);
+	pci_unlock_rescan_remove();
 
 	return rc;
 }
@@ -710,8 +712,10 @@ static void sriov_del_vfs(struct pci_dev *dev)
 	struct pci_sriov *iov = dev->sriov;
 	int i;
 
+	pci_lock_rescan_remove();
 	for (i = 0; i < iov->num_VFs; i++)
 		pci_iov_remove_virtfn(dev, i);
+	pci_unlock_rescan_remove();
 }
 
 static void sriov_disable(struct pci_dev *dev)

@@ -457,26 +457,41 @@ static int mlx5e_alloc_rx_wqes(struct mlx5e_rq *rq, u16 ix, int wqe_bulk)
 static int mlx5e_refill_rx_wqes(struct mlx5e_rq *rq, u16 ix, int wqe_bulk)
 {
 	int remaining = wqe_bulk;
-	int i = 0;
+	int total_alloc = 0;
+	int refill_alloc;
+	int refill;
 
 	/* The WQE bulk is split into smaller bulks that are sized
 	 * according to the page pool cache refill size to avoid overflowing
 	 * the page pool cache due to too many page releases at once.
 	 */
 	do {
-		int refill = min_t(u16, rq->wqe.info.refill_unit, remaining);
-		int alloc_count;
+		refill = min_t(u16, rq->wqe.info.refill_unit, remaining);
 
-		mlx5e_free_rx_wqes(rq, ix + i, refill);
-		alloc_count = mlx5e_alloc_rx_wqes(rq, ix + i, refill);
-		i += alloc_count;
-		if (unlikely(alloc_count != refill))
-			break;
+		mlx5e_free_rx_wqes(rq, ix + total_alloc, refill);
+		refill_alloc = mlx5e_alloc_rx_wqes(rq, ix + total_alloc, refill);
+		if (unlikely(refill_alloc != refill))
+			goto err_free;
 
+		total_alloc += refill_alloc;
 		remaining -= refill;
 	} while (remaining);
 
-	return i;
+	return total_alloc;
+
+err_free:
+	mlx5e_free_rx_wqes(rq, ix, total_alloc + refill_alloc);
+
+	for (int i = 0; i < total_alloc + refill; i++) {
+		int j = mlx5_wq_cyc_ctr2ix(&rq->wqe.wq, ix + i);
+		struct mlx5e_wqe_frag_info *frag;
+
+		frag = get_frag(rq, j);
+		for (int k = 0; k < rq->wqe.info.num_frags; k++, frag++)
+			frag->flags |= BIT(MLX5E_WQE_FRAG_SKIP_RELEASE);
+	}
+
+	return 0;
 }
 
 static void
@@ -816,6 +831,8 @@ err_unmap:
 		mlx5e_page_release_fragmented(rq, frag_page);
 	}
 
+	bitmap_fill(wi->skip_release_bitmap, rq->mpwqe.pages_per_wqe);
+
 err:
 	rq->stats->buff_alloc_err++;
 
@@ -1142,8 +1159,9 @@ static void mlx5e_lro_update_tcp_hdr(struct mlx5_cqe64 *cqe, struct tcphdr *tcp)
 	}
 }
 
-static void mlx5e_lro_update_hdr(struct sk_buff *skb, struct mlx5_cqe64 *cqe,
-				 u32 cqe_bcnt)
+static unsigned int mlx5e_lro_update_hdr(struct sk_buff *skb,
+					 struct mlx5_cqe64 *cqe,
+					 u32 cqe_bcnt)
 {
 	struct ethhdr	*eth = (struct ethhdr *)(skb->data);
 	struct tcphdr	*tcp;
@@ -1194,6 +1212,8 @@ static void mlx5e_lro_update_hdr(struct sk_buff *skb, struct mlx5_cqe64 *cqe,
 		tcp->check = csum_ipv6_magic(&ipv6->saddr, &ipv6->daddr, payload_len,
 					     IPPROTO_TCP, check);
 	}
+
+	return (unsigned int)((unsigned char *)tcp + tcp->doff * 4 - skb->data);
 }
 
 static void *mlx5e_shampo_get_packet_hd(struct mlx5e_rq *rq, u16 header_index)
@@ -1550,8 +1570,10 @@ static inline void mlx5e_build_rx_skb(struct mlx5_cqe64 *cqe,
 		mlx5e_macsec_offload_handle_rx_skb(netdev, skb, cqe);
 
 	if (lro_num_seg > 1) {
-		mlx5e_lro_update_hdr(skb, cqe, cqe_bcnt);
-		skb_shinfo(skb)->gso_size = DIV_ROUND_UP(cqe_bcnt, lro_num_seg);
+		unsigned int hdrlen = mlx5e_lro_update_hdr(skb, cqe, cqe_bcnt);
+
+		skb_shinfo(skb)->gso_size = DIV_ROUND_UP(cqe_bcnt - hdrlen, lro_num_seg);
+		skb_shinfo(skb)->gso_segs = lro_num_seg;
 		/* Subtract one since we already counted this as one
 		 * "regular" packet in mlx5e_complete_rx_cqe()
 		 */
@@ -2352,9 +2374,13 @@ static void mlx5e_handle_rx_cqe_mpwrq_shampo(struct mlx5e_rq *rq, struct mlx5_cq
 	if (flush)
 		mlx5e_shampo_flush_skb(rq, cqe, match);
 free_hd_entry:
-	mlx5e_free_rx_shampo_hd_entry(rq, header_index);
+	if (likely(head_size))
+		mlx5e_free_rx_shampo_hd_entry(rq, header_index);
 mpwrq_cqe_out:
 	if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
+		return;
+
+	if (unlikely(!cstrides))
 		return;
 
 	wq  = &rq->mpwqe.wq;

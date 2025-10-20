@@ -53,6 +53,8 @@ unsigned long *crst_table_alloc(struct mm_struct *mm)
 
 void crst_table_free(struct mm_struct *mm, unsigned long *table)
 {
+	if (!table)
+		return;
 	pagetable_free(virt_to_ptdesc(table));
 }
 
@@ -146,6 +148,7 @@ struct page *page_table_alloc_pgste(struct mm_struct *mm)
 	ptdesc = pagetable_alloc(GFP_KERNEL, 0);
 	if (ptdesc) {
 		table = (u64 *)ptdesc_to_virt(ptdesc);
+		arch_set_page_dat(virt_to_page(table), 0);
 		memset64(table, _PAGE_INVALID, PTRS_PER_PTE);
 		memset64(table + PTRS_PER_PTE, 0, PTRS_PER_PTE);
 	}
@@ -453,11 +456,6 @@ void pte_free_defer(struct mm_struct *mm, pgtable_t pgtable)
 	page = virt_to_page(pgtable);
 	SetPageActive(page);
 	page_table_free(mm, (unsigned long *)pgtable);
-	/*
-	 * page_table_free() does not do the pgste gmap_unlink() which
-	 * page_table_free_rcu() does: warn us if pgste ever reaches here.
-	 */
-	WARN_ON_ONCE(mm_has_pgste(mm));
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
@@ -499,6 +497,8 @@ static unsigned long *base_crst_alloc(unsigned long val)
 
 static void base_crst_free(unsigned long *table)
 {
+	if (!table)
+		return;
 	pagetable_free(virt_to_ptdesc(table));
 }
 

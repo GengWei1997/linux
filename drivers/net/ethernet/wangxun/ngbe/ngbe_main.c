@@ -121,10 +121,8 @@ static int ngbe_sw_init(struct wx *wx)
 
 	/* PCI config space info */
 	err = wx_sw_init(wx);
-	if (err < 0) {
-		wx_err(wx, "read of internal subsystem device id failed\n");
+	if (err < 0)
 		return err;
-	}
 
 	/* mac type, phy type , oem type */
 	ngbe_init_type_code(wx);
@@ -591,7 +589,7 @@ static int ngbe_probe(struct pci_dev *pdev,
 	/* setup the private structure */
 	err = ngbe_sw_init(wx);
 	if (err)
-		goto err_free_mac_table;
+		goto err_pci_release_regions;
 
 	/* check if flash load is done after hw power up */
 	err = wx_check_flash_load(wx, NGBE_SPI_ILDR_STATUS_PERST);
@@ -689,6 +687,7 @@ err_register:
 err_clear_interrupt_scheme:
 	wx_clear_interrupt_scheme(wx);
 err_free_mac_table:
+	kfree(wx->rss_key);
 	kfree(wx->mac_table);
 err_pci_release_regions:
 	pci_release_selected_regions(pdev,

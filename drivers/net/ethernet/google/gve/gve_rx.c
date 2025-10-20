@@ -146,7 +146,7 @@ static int gve_prefill_rx_pages(struct gve_rx_ring *rx)
 		err = gve_rx_alloc_buffer(priv, &priv->pdev->dev, &rx->data.page_info[i],
 					  &rx->data.data_ring[i]);
 		if (err)
-			goto alloc_err;
+			goto alloc_err_rda;
 	}
 
 	if (!rx->data.raw_addressing) {
@@ -171,12 +171,26 @@ static int gve_prefill_rx_pages(struct gve_rx_ring *rx)
 	return slots;
 
 alloc_err_qpl:
+	/* Fully free the copy pool pages. */
 	while (j--) {
 		page_ref_sub(rx->qpl_copy_pool[j].page,
 			     rx->qpl_copy_pool[j].pagecnt_bias - 1);
 		put_page(rx->qpl_copy_pool[j].page);
 	}
-alloc_err:
+
+	/* Do not fully free QPL pages - only remove the bias added in this
+	 * function with gve_setup_rx_buffer.
+	 */
+	while (i--)
+		page_ref_sub(rx->data.page_info[i].page,
+			     rx->data.page_info[i].pagecnt_bias - 1);
+
+	gve_unassign_qpl(priv, rx->data.qpl->id);
+	rx->data.qpl = NULL;
+
+	return err;
+
+alloc_err_rda:
 	while (i--)
 		gve_rx_free_buffer(&priv->pdev->dev,
 				   &rx->data.page_info[i],
@@ -348,7 +362,7 @@ static enum pkt_hash_types gve_rss_type(__be16 pkt_flags)
 
 static struct sk_buff *gve_rx_add_frags(struct napi_struct *napi,
 					struct gve_rx_slot_page_info *page_info,
-					u16 packet_buffer_size, u16 len,
+					unsigned int truesize, u16 len,
 					struct gve_rx_ctx *ctx)
 {
 	u32 offset = page_info->page_offset + page_info->pad;
@@ -381,10 +395,10 @@ static struct sk_buff *gve_rx_add_frags(struct napi_struct *napi,
 	if (skb != ctx->skb_head) {
 		ctx->skb_head->len += len;
 		ctx->skb_head->data_len += len;
-		ctx->skb_head->truesize += packet_buffer_size;
+		ctx->skb_head->truesize += truesize;
 	}
 	skb_add_rx_frag(skb, num_frags, page_info->page,
-			offset, len, packet_buffer_size);
+			offset, len, truesize);
 
 	return ctx->skb_head;
 }
@@ -478,7 +492,7 @@ static struct sk_buff *gve_rx_copy_to_pool(struct gve_rx_ring *rx,
 
 		memcpy(alloc_page_info.page_address, src, page_info->pad + len);
 		skb = gve_rx_add_frags(napi, &alloc_page_info,
-				       rx->packet_buffer_size,
+				       PAGE_SIZE,
 				       len, ctx);
 
 		u64_stats_update_begin(&rx->statss);
@@ -992,10 +1006,6 @@ int gve_rx_poll(struct gve_notify_block *block, int budget)
 	int work_done = 0;
 
 	feat = block->napi.dev->features;
-
-	/* If budget is 0, do all the work */
-	if (budget == 0)
-		budget = INT_MAX;
 
 	if (budget > 0)
 		work_done = gve_clean_rx_done(rx, budget, feat);

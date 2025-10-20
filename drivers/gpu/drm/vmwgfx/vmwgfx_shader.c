@@ -180,7 +180,7 @@ static int vmw_gb_shader_init(struct vmw_private *dev_priv,
 
 	res->guest_memory_size = size;
 	if (byte_code) {
-		res->guest_memory_bo = vmw_bo_reference(byte_code);
+		res->guest_memory_bo = vmw_user_bo_ref(byte_code);
 		res->guest_memory_offset = offset;
 	}
 	shader->size = size;
@@ -809,7 +809,7 @@ static int vmw_shader_define(struct drm_device *dev, struct drm_file *file_priv,
 				    shader_type, num_input_sig,
 				    num_output_sig, tfile, shader_handle);
 out_bad_arg:
-	vmw_user_bo_unref(buffer);
+	vmw_user_bo_unref(&buffer);
 	return ret;
 }
 
@@ -896,7 +896,8 @@ int vmw_compat_shader_add(struct vmw_private *dev_priv,
 		.busy_domain = VMW_BO_DOMAIN_SYS,
 		.bo_type = ttm_bo_type_device,
 		.size = size,
-		.pin = true
+		.pin = false,
+		.keep_resv = true,
 	};
 
 	if (!vmw_shader_id_ok(user_key, shader_type))
@@ -905,10 +906,6 @@ int vmw_compat_shader_add(struct vmw_private *dev_priv,
 	ret = vmw_bo_create(dev_priv, &bo_params, &buf);
 	if (unlikely(ret != 0))
 		goto out;
-
-	ret = ttm_bo_reserve(&buf->tbo, false, true, NULL);
-	if (unlikely(ret != 0))
-		goto no_reserve;
 
 	/* Map and copy shader bytecode. */
 	ret = ttm_bo_kmap(&buf->tbo, 0, PFN_UP(size), &map);

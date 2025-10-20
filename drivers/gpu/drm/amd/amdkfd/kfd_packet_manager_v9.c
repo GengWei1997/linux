@@ -121,6 +121,7 @@ static int pm_map_process_aldebaran(struct packet_manager *pm,
 	packet->sh_mem_bases = qpd->sh_mem_bases;
 	if (qpd->tba_addr) {
 		packet->sq_shader_tba_lo = lower_32_bits(qpd->tba_addr >> 8);
+		packet->sq_shader_tba_hi = upper_32_bits(qpd->tba_addr >> 8);
 		packet->sq_shader_tma_lo = lower_32_bits(qpd->tma_addr >> 8);
 		packet->sq_shader_tma_hi = upper_32_bits(qpd->tma_addr >> 8);
 	}
@@ -224,7 +225,7 @@ static int pm_map_queues_v9(struct packet_manager *pm, uint32_t *buffer,
 
 	packet->bitfields2.engine_sel =
 		engine_sel__mes_map_queues__compute_vi;
-	packet->bitfields2.gws_control_queue = q->gws ? 1 : 0;
+	packet->bitfields2.gws_control_queue = q->properties.is_gws ? 1 : 0;
 	packet->bitfields2.extended_engine_sel =
 		extended_engine_sel__mes_map_queues__legacy_engine_sel;
 	packet->bitfields2.queue_type =

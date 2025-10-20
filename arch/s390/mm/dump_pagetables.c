@@ -249,11 +249,9 @@ static int ptdump_show(struct seq_file *m, void *v)
 		.marker = address_markers,
 	};
 
-	get_online_mems();
 	mutex_lock(&cpa_mutex);
 	ptdump_walk_pgd(&st.ptdump, &init_mm, NULL);
 	mutex_unlock(&cpa_mutex);
-	put_online_mems();
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(ptdump);
@@ -290,8 +288,8 @@ static int pt_dump_init(void)
 	max_addr = (S390_lowcore.kernel_asce & _REGION_ENTRY_TYPE_MASK) >> 2;
 	max_addr = 1UL << (max_addr * 11 + 31);
 	address_markers[IDENTITY_AFTER_END_NR].start_address = ident_map_size;
-	address_markers[AMODE31_START_NR].start_address = __samode31;
-	address_markers[AMODE31_END_NR].start_address = __eamode31;
+	address_markers[AMODE31_START_NR].start_address = (unsigned long)__samode31;
+	address_markers[AMODE31_END_NR].start_address = (unsigned long)__eamode31;
 	address_markers[MODULES_NR].start_address = MODULES_VADDR;
 	address_markers[MODULES_END_NR].start_address = MODULES_END;
 	address_markers[ABS_LOWCORE_NR].start_address = __abs_lowcore;

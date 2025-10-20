@@ -9,7 +9,6 @@
 
 #include <linux/device.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/regmap.h>
 
 struct drm_crtc;
@@ -38,7 +37,7 @@ struct meson_drm_match_data {
 };
 
 struct meson_drm_soc_limits {
-	unsigned int max_hdmi_phy_freq;
+	unsigned long long max_hdmi_phy_freq;
 };
 
 struct meson_drm {

@@ -12,7 +12,6 @@
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
@@ -600,6 +599,10 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 
 	/* check the crtc is detached already from encoder */
 	if (!ctx->drm_dev)
+		goto out;
+
+	/* check if crtc and vblank have been initialized properly */
+	if (!drm_dev_has_vblank(ctx->drm_dev))
 		goto out;
 
 	if (!ctx->i80_if) {

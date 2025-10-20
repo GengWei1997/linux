@@ -62,6 +62,12 @@ struct v3d_perfmon {
 	u64 values[];
 };
 
+enum v3d_irq {
+	V3D_CORE_IRQ,
+	V3D_HUB_IRQ,
+	V3D_MAX_IRQS,
+};
+
 struct v3d_dev {
 	struct drm_device drm;
 
@@ -70,6 +76,8 @@ struct v3d_dev {
 	 */
 	int ver;
 	bool single_irq_line;
+
+	int irq[V3D_MAX_IRQS];
 
 	void __iomem *hub_regs;
 	void __iomem *core_regs[3];
@@ -340,7 +348,7 @@ struct v3d_submit_ext {
 static inline unsigned long nsecs_to_jiffies_timeout(const u64 n)
 {
 	/* nsecs_to_jiffies64() does not guard against overflow */
-	if (NSEC_PER_SEC % HZ &&
+	if ((NSEC_PER_SEC % HZ) != 0 &&
 	    div_u64(n, NSEC_PER_SEC) >= MAX_JIFFY_OFFSET / HZ)
 		return MAX_JIFFY_OFFSET;
 

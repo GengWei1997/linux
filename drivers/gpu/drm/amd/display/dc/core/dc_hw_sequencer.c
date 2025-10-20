@@ -187,6 +187,7 @@ static bool is_ycbcr709_limited_type(
 		ret = true;
 	return ret;
 }
+
 static enum dc_color_space_type get_color_space_type(enum dc_color_space color_space)
 {
 	enum dc_color_space_type type = COLOR_SPACE_RGB_TYPE;
@@ -725,6 +726,9 @@ void hwss_setup_dpp(union block_sequence_params *params)
 	struct pipe_ctx *pipe_ctx = params->setup_dpp_params.pipe_ctx;
 	struct dpp *dpp = pipe_ctx->plane_res.dpp;
 	struct dc_plane_state *plane_state = pipe_ctx->plane_state;
+
+	if (!plane_state)
+		return;
 
 	if (dpp && dpp->funcs->dpp_setup) {
 		// program the input csc

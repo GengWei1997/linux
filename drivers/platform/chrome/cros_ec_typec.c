@@ -390,6 +390,7 @@ static int cros_typec_init_ports(struct cros_typec_data *typec)
 	return 0;
 
 unregister_ports:
+	fwnode_handle_put(fwnode);
 	cros_unregister_ports(typec);
 	return ret;
 }
@@ -402,6 +403,27 @@ static int cros_typec_usb_safe_state(struct cros_typec_port *port)
 	ret = cros_typec_retimer_set(port->retimer, port->state);
 	if (!ret)
 		ret = typec_mux_set(port->mux, &port->state);
+
+	return ret;
+}
+
+/**
+ * cros_typec_get_cable_vdo() - Get Cable VDO of the connected cable
+ * @port: Type-C port data
+ * @svid: Standard or Vendor ID to match
+ *
+ * Returns the Cable VDO if match is found and returns 0 if match is not found.
+ */
+static int cros_typec_get_cable_vdo(struct cros_typec_port *port, u16 svid)
+{
+	struct list_head *head = &port->plug_mode_list;
+	struct cros_typec_altmode_node *node;
+	u32 ret = 0;
+
+	list_for_each_entry(node, head, list) {
+		if (node->amode->svid == svid)
+			return node->amode->vdo;
+	}
 
 	return ret;
 }
@@ -432,6 +454,9 @@ static int cros_typec_enable_tbt(struct cros_typec_data *typec,
 
 	/* Cable Discover Mode VDO */
 	data.cable_mode = TBT_MODE;
+
+	data.cable_mode |= cros_typec_get_cable_vdo(port, USB_TYPEC_TBT_SID);
+
 	data.cable_mode |= TBT_SET_CABLE_SPEED(pd_ctrl->cable_speed);
 
 	if (pd_ctrl->control_flags & USB_PD_CTRL_OPTICAL_CABLE)
@@ -522,8 +547,10 @@ static int cros_typec_enable_usb4(struct cros_typec_data *typec,
 	/* Cable Type */
 	if (pd_ctrl->control_flags & USB_PD_CTRL_OPTICAL_CABLE)
 		data.eudo |= EUDO_CABLE_TYPE_OPTICAL << EUDO_CABLE_TYPE_SHIFT;
-	else if (pd_ctrl->control_flags & USB_PD_CTRL_ACTIVE_CABLE)
+	else if (cros_typec_get_cable_vdo(port, USB_TYPEC_TBT_SID) & TBT_CABLE_RETIMER)
 		data.eudo |= EUDO_CABLE_TYPE_RE_TIMER << EUDO_CABLE_TYPE_SHIFT;
+	else if (pd_ctrl->control_flags & USB_PD_CTRL_ACTIVE_CABLE)
+		data.eudo |= EUDO_CABLE_TYPE_RE_DRIVER << EUDO_CABLE_TYPE_SHIFT;
 
 	data.active_link_training = !!(pd_ctrl->control_flags &
 				       USB_PD_CTRL_ACTIVE_LINK_UNIDIR);
@@ -1152,8 +1179,8 @@ static int cros_typec_probe(struct platform_device *pdev)
 
 	typec->ec = dev_get_drvdata(pdev->dev.parent);
 	if (!typec->ec) {
-		dev_err(dev, "couldn't find parent EC device\n");
-		return -ENODEV;
+		dev_warn(dev, "couldn't find parent EC device\n");
+		return -EPROBE_DEFER;
 	}
 
 	platform_set_drvdata(pdev, typec);

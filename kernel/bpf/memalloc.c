@@ -459,8 +459,7 @@ static void notrace irq_work_raise(struct bpf_mem_cache *c)
  * Typical case will be between 11K and 116K closer to 11K.
  * bpf progs can and should share bpf_mem_cache when possible.
  */
-
-static void prefill_mem_cache(struct bpf_mem_cache *c, int cpu)
+static void init_refill_work(struct bpf_mem_cache *c)
 {
 	init_irq_work(&c->refill_work, bpf_mem_refill);
 	if (c->unit_size <= 256) {
@@ -476,7 +475,10 @@ static void prefill_mem_cache(struct bpf_mem_cache *c, int cpu)
 		c->high_watermark = max(96 * 256 / c->unit_size, 3);
 	}
 	c->batch = max((c->high_watermark - c->low_watermark) / 4 * 3, 1);
+}
 
+static void prefill_mem_cache(struct bpf_mem_cache *c, int cpu)
+{
 	/* To avoid consuming memory assume that 1st run of bpf
 	 * prog won't be doing more than 4 map_update_elem from
 	 * irq disabled region
@@ -498,6 +500,8 @@ int bpf_mem_alloc_init(struct bpf_mem_alloc *ma, int size, bool percpu)
 	struct bpf_mem_cache *c, __percpu *pc;
 	struct obj_cgroup *objcg = NULL;
 	int cpu, i, unit_size, percpu_size = 0;
+
+	ma->percpu = percpu;
 
 	if (size) {
 		pc = __alloc_percpu_gfp(sizeof(*pc), 8, GFP_KERNEL);
@@ -521,6 +525,7 @@ int bpf_mem_alloc_init(struct bpf_mem_alloc *ma, int size, bool percpu)
 			c->objcg = objcg;
 			c->percpu_size = percpu_size;
 			c->tgt = c;
+			init_refill_work(c);
 			prefill_mem_cache(c, cpu);
 		}
 		ma->cache = pc;
@@ -544,9 +549,12 @@ int bpf_mem_alloc_init(struct bpf_mem_alloc *ma, int size, bool percpu)
 			c->unit_size = sizes[i];
 			c->objcg = objcg;
 			c->tgt = c;
+
+			init_refill_work(c);
 			prefill_mem_cache(c, cpu);
 		}
 	}
+
 	ma->caches = pcc;
 	return 0;
 }
@@ -812,7 +820,7 @@ void notrace *bpf_mem_alloc(struct bpf_mem_alloc *ma, size_t size)
 	void *ret;
 
 	if (!size)
-		return ZERO_SIZE_PTR;
+		return NULL;
 
 	idx = bpf_mem_cache_idx(size + LLIST_NODE_SZ);
 	if (idx < 0)
@@ -824,13 +832,15 @@ void notrace *bpf_mem_alloc(struct bpf_mem_alloc *ma, size_t size)
 
 void notrace bpf_mem_free(struct bpf_mem_alloc *ma, void *ptr)
 {
+	struct bpf_mem_cache *c;
 	int idx;
 
 	if (!ptr)
 		return;
 
-	idx = bpf_mem_cache_idx(ksize(ptr - LLIST_NODE_SZ));
-	if (idx < 0)
+	c = *(void **)(ptr - LLIST_NODE_SZ);
+	idx = bpf_mem_cache_idx(c->unit_size);
+	if (WARN_ON_ONCE(idx < 0))
 		return;
 
 	unit_free(this_cpu_ptr(ma->caches)->cache + idx, ptr);
@@ -838,13 +848,15 @@ void notrace bpf_mem_free(struct bpf_mem_alloc *ma, void *ptr)
 
 void notrace bpf_mem_free_rcu(struct bpf_mem_alloc *ma, void *ptr)
 {
+	struct bpf_mem_cache *c;
 	int idx;
 
 	if (!ptr)
 		return;
 
-	idx = bpf_mem_cache_idx(ksize(ptr - LLIST_NODE_SZ));
-	if (idx < 0)
+	c = *(void **)(ptr - LLIST_NODE_SZ);
+	idx = bpf_mem_cache_idx(c->unit_size);
+	if (WARN_ON_ONCE(idx < 0))
 		return;
 
 	unit_free_rcu(this_cpu_ptr(ma->caches)->cache + idx, ptr);
@@ -910,6 +922,8 @@ void notrace *bpf_mem_cache_alloc_flags(struct bpf_mem_alloc *ma, gfp_t flags)
 		memcg = get_memcg(c);
 		old_memcg = set_active_memcg(memcg);
 		ret = __alloc(c, NUMA_NO_NODE, GFP_KERNEL | __GFP_NOWARN | __GFP_ACCOUNT);
+		if (ret)
+			*(struct bpf_mem_cache **)ret = c;
 		set_active_memcg(old_memcg);
 		mem_cgroup_put(memcg);
 	}

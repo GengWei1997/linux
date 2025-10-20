@@ -58,7 +58,11 @@ struct vm_fault;
 #define IOMAP_F_DIRTY		(1U << 1)
 #define IOMAP_F_SHARED		(1U << 2)
 #define IOMAP_F_MERGED		(1U << 3)
+#ifdef CONFIG_BUFFER_HEAD
 #define IOMAP_F_BUFFER_HEAD	(1U << 4)
+#else
+#define IOMAP_F_BUFFER_HEAD	0
+#endif /* CONFIG_BUFFER_HEAD */
 #define IOMAP_F_XATTR		(1U << 5)
 
 /*
@@ -250,6 +254,25 @@ static inline const struct iomap *iomap_iter_srcmap(const struct iomap_iter *i)
 	if (i->srcmap.type != IOMAP_HOLE)
 		return &i->srcmap;
 	return &i->iomap;
+}
+
+/*
+ * Check if the range needs to be unshared for a FALLOC_FL_UNSHARE_RANGE
+ * operation.
+ *
+ * Don't bother with blocks that are not shared to start with; or mappings that
+ * cannot be shared, such as inline data, delalloc reservations, holes or
+ * unwritten extents.
+ *
+ * Note that we use srcmap directly instead of iomap_iter_srcmap as unsharing
+ * requires providing a separate source map, and the presence of one is a good
+ * indicator that unsharing is needed, unlike IOMAP_F_SHARED which can be set
+ * for any data that goes into the COW fork for XFS.
+ */
+static inline bool iomap_want_unshare_iter(const struct iomap_iter *iter)
+{
+	return (iter->iomap.flags & IOMAP_F_SHARED) &&
+		iter->srcmap.type == IOMAP_MAPPED;
 }
 
 ssize_t iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *from,

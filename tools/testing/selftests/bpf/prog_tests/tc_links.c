@@ -9,6 +9,8 @@
 #define ping_cmd "ping -q -c1 -w1 127.0.0.1 > /dev/null"
 
 #include "test_tc_link.skel.h"
+
+#include "netlink_helpers.h"
 #include "tc_helpers.h"
 
 void serial_test_tc_links_basic(void)
@@ -65,6 +67,7 @@ void serial_test_tc_links_basic(void)
 	ASSERT_EQ(optq.prog_ids[1], 0, "prog_ids[1]");
 	ASSERT_EQ(optq.link_ids[1], 0, "link_ids[1]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -97,6 +100,7 @@ void serial_test_tc_links_basic(void)
 	ASSERT_EQ(optq.prog_ids[1], 0, "prog_ids[1]");
 	ASSERT_EQ(optq.link_ids[1], 0, "link_ids[1]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -187,15 +191,13 @@ static void test_tc_links_before_target(int target)
 	ASSERT_EQ(optq.prog_ids[2], 0, "prog_ids[2]");
 	ASSERT_EQ(optq.link_ids[2], 0, "link_ids[2]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, true, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, false, "seen_tc3");
 	ASSERT_EQ(skel->bss->seen_tc4, false, "seen_tc4");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
 
 	LIBBPF_OPTS_RESET(optl,
 		.flags = BPF_F_BEFORE,
@@ -246,6 +248,7 @@ static void test_tc_links_before_target(int target)
 	ASSERT_EQ(optq.prog_ids[4], 0, "prog_ids[4]");
 	ASSERT_EQ(optq.link_ids[4], 0, "link_ids[4]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -342,15 +345,13 @@ static void test_tc_links_after_target(int target)
 	ASSERT_EQ(optq.prog_ids[2], 0, "prog_ids[2]");
 	ASSERT_EQ(optq.link_ids[2], 0, "link_ids[2]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, true, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, false, "seen_tc3");
 	ASSERT_EQ(skel->bss->seen_tc4, false, "seen_tc4");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
 
 	LIBBPF_OPTS_RESET(optl,
 		.flags = BPF_F_AFTER,
@@ -401,6 +402,7 @@ static void test_tc_links_after_target(int target)
 	ASSERT_EQ(optq.prog_ids[4], 0, "prog_ids[4]");
 	ASSERT_EQ(optq.link_ids[4], 0, "link_ids[4]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -502,6 +504,7 @@ static void test_tc_links_revision_target(int target)
 	ASSERT_EQ(optq.prog_ids[2], 0, "prog_ids[2]");
 	ASSERT_EQ(optq.link_ids[2], 0, "prog_ids[2]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -581,15 +584,12 @@ static void test_tc_chain_classic(int target, bool chain_tc_old)
 
 	assert_mprog_count(target, 2);
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, true, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, chain_tc_old, "seen_tc3");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
-	skel->bss->seen_tc3 = false;
 
 	err = bpf_link__detach(skel->links.tc2);
 	if (!ASSERT_OK(err, "prog_detach"))
@@ -597,6 +597,7 @@ static void test_tc_chain_classic(int target, bool chain_tc_old)
 
 	assert_mprog_count(target, 1);
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -707,15 +708,12 @@ static void test_tc_links_replace_target(int target)
 	ASSERT_EQ(optq.prog_ids[2], 0, "prog_ids[2]");
 	ASSERT_EQ(optq.link_ids[2], 0, "link_ids[2]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, true, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, false, "seen_tc3");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
-	skel->bss->seen_tc3 = false;
 
 	LIBBPF_OPTS_RESET(optl,
 		.flags = BPF_F_REPLACE,
@@ -781,15 +779,12 @@ static void test_tc_links_replace_target(int target)
 	ASSERT_EQ(optq.prog_ids[2], 0, "prog_ids[2]");
 	ASSERT_EQ(optq.link_ids[2], 0, "link_ids[2]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, false, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, true, "seen_tc3");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
-	skel->bss->seen_tc3 = false;
 
 	err = bpf_link__detach(skel->links.tc2);
 	if (!ASSERT_OK(err, "link_detach"))
@@ -812,15 +807,12 @@ static void test_tc_links_replace_target(int target)
 	ASSERT_EQ(optq.prog_ids[1], 0, "prog_ids[1]");
 	ASSERT_EQ(optq.link_ids[1], 0, "link_ids[1]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, false, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, false, "seen_tc3");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
-	skel->bss->seen_tc3 = false;
 
 	err = bpf_link__update_program(skel->links.tc1, skel->progs.tc1);
 	if (!ASSERT_OK(err, "link_update_self"))
@@ -843,6 +835,7 @@ static void test_tc_links_replace_target(int target)
 	ASSERT_EQ(optq.prog_ids[1], 0, "prog_ids[1]");
 	ASSERT_EQ(optq.link_ids[1], 0, "link_ids[1]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -1254,15 +1247,13 @@ static void test_tc_links_prepend_target(int target)
 	ASSERT_EQ(optq.prog_ids[2], 0, "prog_ids[2]");
 	ASSERT_EQ(optq.link_ids[2], 0, "link_ids[2]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, true, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, false, "seen_tc3");
 	ASSERT_EQ(skel->bss->seen_tc4, false, "seen_tc4");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
 
 	LIBBPF_OPTS_RESET(optl,
 		.flags = BPF_F_BEFORE,
@@ -1311,6 +1302,7 @@ static void test_tc_links_prepend_target(int target)
 	ASSERT_EQ(optq.prog_ids[4], 0, "prog_ids[4]");
 	ASSERT_EQ(optq.link_ids[4], 0, "link_ids[4]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -1411,15 +1403,13 @@ static void test_tc_links_append_target(int target)
 	ASSERT_EQ(optq.prog_ids[2], 0, "prog_ids[2]");
 	ASSERT_EQ(optq.link_ids[2], 0, "link_ids[2]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, true, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, false, "seen_tc3");
 	ASSERT_EQ(skel->bss->seen_tc4, false, "seen_tc4");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
 
 	LIBBPF_OPTS_RESET(optl,
 		.flags = BPF_F_AFTER,
@@ -1468,6 +1458,7 @@ static void test_tc_links_append_target(int target)
 	ASSERT_EQ(optq.prog_ids[4], 0, "prog_ids[4]");
 	ASSERT_EQ(optq.link_ids[4], 0, "link_ids[4]");
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -1637,15 +1628,12 @@ static void test_tc_chain_mixed(int target)
 
 	assert_mprog_count(target, 1);
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc4, false, "seen_tc4");
 	ASSERT_EQ(skel->bss->seen_tc5, false, "seen_tc5");
 	ASSERT_EQ(skel->bss->seen_tc6, true, "seen_tc6");
-
-	skel->bss->seen_tc4 = false;
-	skel->bss->seen_tc5 = false;
-	skel->bss->seen_tc6 = false;
 
 	err = bpf_link__update_program(skel->links.tc6, skel->progs.tc4);
 	if (!ASSERT_OK(err, "link_update"))
@@ -1653,22 +1641,20 @@ static void test_tc_chain_mixed(int target)
 
 	assert_mprog_count(target, 1);
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc4, true, "seen_tc4");
 	ASSERT_EQ(skel->bss->seen_tc5, true, "seen_tc5");
 	ASSERT_EQ(skel->bss->seen_tc6, false, "seen_tc6");
 
-	skel->bss->seen_tc4 = false;
-	skel->bss->seen_tc5 = false;
-	skel->bss->seen_tc6 = false;
-
 	err = bpf_link__detach(skel->links.tc6);
 	if (!ASSERT_OK(err, "prog_detach"))
 		goto cleanup;
 
-	__assert_mprog_count(target, 0, true, loopback);
+	assert_mprog_count(target, 0);
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc4, false, "seen_tc4");
@@ -1758,15 +1744,12 @@ static void test_tc_links_ingress(int target, bool chain_tc_old,
 
 	assert_mprog_count(target, 2);
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
 	ASSERT_EQ(skel->bss->seen_tc2, true, "seen_tc2");
 	ASSERT_EQ(skel->bss->seen_tc3, chain_tc_old, "seen_tc3");
-
-	skel->bss->seen_tc1 = false;
-	skel->bss->seen_tc2 = false;
-	skel->bss->seen_tc3 = false;
 
 	err = bpf_link__detach(skel->links.tc2);
 	if (!ASSERT_OK(err, "prog_detach"))
@@ -1774,6 +1757,7 @@ static void test_tc_links_ingress(int target, bool chain_tc_old,
 
 	assert_mprog_count(target, 1);
 
+	tc_skel_reset_all_seen(skel);
 	ASSERT_OK(system(ping_cmd), ping_cmd);
 
 	ASSERT_EQ(skel->bss->seen_tc1, true, "seen_tc1");
@@ -1803,6 +1787,65 @@ void serial_test_tc_links_ingress(void)
 	test_tc_links_ingress(BPF_TCX_INGRESS, true, true);
 	test_tc_links_ingress(BPF_TCX_INGRESS, true, false);
 	test_tc_links_ingress(BPF_TCX_INGRESS, false, false);
+}
+
+struct qdisc_req {
+	struct nlmsghdr  n;
+	struct tcmsg     t;
+	char             buf[1024];
+};
+
+static int qdisc_replace(int ifindex, const char *kind, bool block)
+{
+	struct rtnl_handle rth = { .fd = -1 };
+	struct qdisc_req req;
+	int err;
+
+	err = rtnl_open(&rth, 0);
+	if (!ASSERT_OK(err, "open_rtnetlink"))
+		return err;
+
+	memset(&req, 0, sizeof(req));
+	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg));
+	req.n.nlmsg_flags = NLM_F_CREATE | NLM_F_REPLACE | NLM_F_REQUEST;
+	req.n.nlmsg_type = RTM_NEWQDISC;
+	req.t.tcm_family = AF_UNSPEC;
+	req.t.tcm_ifindex = ifindex;
+	req.t.tcm_parent = 0xfffffff1;
+
+	addattr_l(&req.n, sizeof(req), TCA_KIND, kind, strlen(kind) + 1);
+	if (block)
+		addattr32(&req.n, sizeof(req), TCA_INGRESS_BLOCK, 1);
+
+	err = rtnl_talk(&rth, &req.n, NULL);
+	ASSERT_OK(err, "talk_rtnetlink");
+	rtnl_close(&rth);
+	return err;
+}
+
+void serial_test_tc_links_dev_chain0(void)
+{
+	int err, ifindex;
+
+	ASSERT_OK(system("ip link add dev foo type veth peer name bar"), "add veth");
+	ifindex = if_nametoindex("foo");
+	ASSERT_NEQ(ifindex, 0, "non_zero_ifindex");
+	err = qdisc_replace(ifindex, "ingress", true);
+	if (!ASSERT_OK(err, "attaching ingress"))
+		goto cleanup;
+	ASSERT_OK(system("tc filter add block 1 matchall action skbmod swap mac"), "add block");
+	err = qdisc_replace(ifindex, "clsact", false);
+	if (!ASSERT_OK(err, "attaching clsact"))
+		goto cleanup;
+	/* Heuristic: kern_sync_rcu() alone does not work; a wait-time of ~5s
+	 * triggered the issue without the fix reliably 100% of the time.
+	 */
+	sleep(5);
+	ASSERT_OK(system("tc filter add dev foo ingress matchall action skbmod swap mac"), "add filter");
+cleanup:
+	ASSERT_OK(system("ip link del dev foo"), "del veth");
+	ASSERT_EQ(if_nametoindex("foo"), 0, "foo removed");
+	ASSERT_EQ(if_nametoindex("bar"), 0, "bar removed");
 }
 
 static void test_tc_links_dev_mixed(int target)

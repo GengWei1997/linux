@@ -39,6 +39,26 @@ static void __activate_traps(struct kvm_vcpu *vcpu)
 
 	___activate_traps(vcpu);
 
+	if (has_cntpoff()) {
+		struct timer_map map;
+
+		get_timer_map(vcpu, &map);
+
+		/*
+		 * We're entrering the guest. Reload the correct
+		 * values from memory now that TGE is clear.
+		 */
+		if (map.direct_ptimer == vcpu_ptimer(vcpu))
+			val = __vcpu_sys_reg(vcpu, CNTP_CVAL_EL0);
+		if (map.direct_ptimer == vcpu_hptimer(vcpu))
+			val = __vcpu_sys_reg(vcpu, CNTHP_CVAL_EL2);
+
+		if (map.direct_ptimer) {
+			write_sysreg_el0(val, SYS_CNTP_CVAL);
+			isb();
+		}
+	}
+
 	val = read_sysreg(cpacr_el1);
 	val |= CPACR_ELx_TTA;
 	val &= ~(CPACR_EL1_ZEN_EL0EN | CPACR_EL1_ZEN_EL1EN |
@@ -76,6 +96,30 @@ static void __deactivate_traps(struct kvm_vcpu *vcpu)
 	___deactivate_traps(vcpu);
 
 	write_sysreg(HCR_HOST_VHE_FLAGS, hcr_el2);
+
+	if (has_cntpoff()) {
+		struct timer_map map;
+		u64 val, offset;
+
+		get_timer_map(vcpu, &map);
+
+		/*
+		 * We're exiting the guest. Save the latest CVAL value
+		 * to memory and apply the offset now that TGE is set.
+		 */
+		val = read_sysreg_el0(SYS_CNTP_CVAL);
+		if (map.direct_ptimer == vcpu_ptimer(vcpu))
+			__vcpu_sys_reg(vcpu, CNTP_CVAL_EL0) = val;
+		if (map.direct_ptimer == vcpu_hptimer(vcpu))
+			__vcpu_sys_reg(vcpu, CNTHP_CVAL_EL2) = val;
+
+		offset = read_sysreg_s(SYS_CNTPOFF_EL2);
+
+		if (map.direct_ptimer && offset) {
+			write_sysreg_el0(val + offset, SYS_CNTP_CVAL);
+			isb();
+		}
+	}
 
 	/*
 	 * ARM errata 1165522 and 1530923 require the actual execution of the
@@ -128,13 +172,10 @@ static const exit_handler_fn hyp_exit_handlers[] = {
 	[ESR_ELx_EC_PAC]		= kvm_hyp_handle_ptrauth,
 };
 
-static const exit_handler_fn *kvm_get_exit_handler_array(struct kvm_vcpu *vcpu)
+static inline bool fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
-	return hyp_exit_handlers;
-}
+	synchronize_vcpu_pstate(vcpu, exit_code);
 
-static void early_exit_filter(struct kvm_vcpu *vcpu, u64 *exit_code)
-{
 	/*
 	 * If we were in HYP context on entry, adjust the PSTATE view
 	 * so that the usual helpers work correctly.
@@ -154,6 +195,8 @@ static void early_exit_filter(struct kvm_vcpu *vcpu, u64 *exit_code)
 		*vcpu_cpsr(vcpu) &= ~(PSR_MODE_MASK | PSR_MODE32_BIT);
 		*vcpu_cpsr(vcpu) |= mode;
 	}
+
+	return __fixup_guest_exit(vcpu, exit_code, hyp_exit_handlers);
 }
 
 /* Switch to the guest for VHE systems running in EL2 */
@@ -168,6 +211,8 @@ static int __kvm_vcpu_run_vhe(struct kvm_vcpu *vcpu)
 	guest_ctxt = &vcpu->arch.ctxt;
 
 	sysreg_save_host_state_vhe(host_ctxt);
+
+	fpsimd_lazy_switch_to_guest(vcpu);
 
 	/*
 	 * ARM erratum 1165522 requires us to configure both stage 1 and
@@ -203,6 +248,8 @@ static int __kvm_vcpu_run_vhe(struct kvm_vcpu *vcpu)
 	sysreg_save_guest_state_vhe(guest_ctxt);
 
 	__deactivate_traps(vcpu);
+
+	fpsimd_lazy_switch_to_host(vcpu);
 
 	sysreg_restore_host_state_vhe(host_ctxt);
 

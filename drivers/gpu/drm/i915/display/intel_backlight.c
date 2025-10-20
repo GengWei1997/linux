@@ -40,8 +40,9 @@ static u32 scale(u32 source_val,
 {
 	u64 target_val;
 
-	WARN_ON(source_min > source_max);
-	WARN_ON(target_min > target_max);
+	if (WARN_ON(source_min >= source_max) ||
+	    WARN_ON(target_min > target_max))
+		return target_min;
 
 	/* defensive */
 	source_val = clamp(source_val, source_min, source_max);
@@ -274,7 +275,7 @@ static void ext_pwm_set_backlight(const struct drm_connector_state *conn_state, 
 	struct intel_panel *panel = &to_intel_connector(conn_state->connector)->panel;
 
 	pwm_set_relative_duty_cycle(&panel->backlight.pwm_state, level, 100);
-	pwm_apply_state(panel->backlight.pwm, &panel->backlight.pwm_state);
+	pwm_apply_might_sleep(panel->backlight.pwm, &panel->backlight.pwm_state);
 }
 
 static void
@@ -427,7 +428,7 @@ static void ext_pwm_disable_backlight(const struct drm_connector_state *old_conn
 	intel_backlight_set_pwm_level(old_conn_state, level);
 
 	panel->backlight.pwm_state.enabled = false;
-	pwm_apply_state(panel->backlight.pwm, &panel->backlight.pwm_state);
+	pwm_apply_might_sleep(panel->backlight.pwm, &panel->backlight.pwm_state);
 }
 
 void intel_backlight_disable(const struct drm_connector_state *old_conn_state)
@@ -749,7 +750,7 @@ static void ext_pwm_enable_backlight(const struct intel_crtc_state *crtc_state,
 
 	pwm_set_relative_duty_cycle(&panel->backlight.pwm_state, level, 100);
 	panel->backlight.pwm_state.enabled = true;
-	pwm_apply_state(panel->backlight.pwm, &panel->backlight.pwm_state);
+	pwm_apply_might_sleep(panel->backlight.pwm, &panel->backlight.pwm_state);
 }
 
 static void __intel_backlight_enable(const struct intel_crtc_state *crtc_state,

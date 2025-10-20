@@ -11,7 +11,6 @@
 #include "rzg2lc-smarc-pinfunction.dtsi"
 #include "rz-smarc-common.dtsi"
 
-
 / {
 	aliases {
 		serial1 = &scif1;
@@ -39,7 +38,10 @@
 #if (SW_SCIF_CAN || SW_RSPI_CAN)
 &canfd {
 	pinctrl-0 = <&can1_pins>;
-	/delete-node/ channel@0;
+
+	channel0 {
+		status = "disabled";
+	};
 };
 #else
 &canfd {
@@ -128,6 +130,19 @@
 		reg = <0x1a>;
 	};
 };
+
+#if PMOD_MTU3
+&mtu3 {
+	pinctrl-0 = <&mtu3_pins>;
+	pinctrl-names = "default";
+
+	status = "okay";
+};
+
+&spi1 {
+	status = "disabled";
+};
+#endif
 
 /*
  * To enable SCIF1 (SER0) on PMOD1 (CN7), On connector board

@@ -39,10 +39,13 @@ temp_show(struct device *dev, struct device_attribute *attr, char *buf)
 
 	ret = thermal_zone_get_temp(tz, &temperature);
 
-	if (ret)
-		return ret;
+	if (!ret)
+		return sprintf(buf, "%d\n", temperature);
 
-	return sprintf(buf, "%d\n", temperature);
+	if (ret == -EAGAIN)
+		return -ENODATA;
+
+	return ret;
 }
 
 static ssize_t
@@ -185,9 +188,6 @@ trip_point_hyst_store(struct device *dev, struct device_attribute *attr,
 	if (sscanf(attr->attr.name, "trip_point_%d_hyst", &trip_id) != 1)
 		return -EINVAL;
 
-	if (kstrtoint(buf, 10, &trip.hysteresis))
-		return -EINVAL;
-
 	mutex_lock(&tz->lock);
 
 	if (!device_is_registered(dev)) {
@@ -198,7 +198,11 @@ trip_point_hyst_store(struct device *dev, struct device_attribute *attr,
 	ret = __thermal_zone_get_trip(tz, trip_id, &trip);
 	if (ret)
 		goto unlock;
-	
+
+	ret = kstrtoint(buf, 10, &trip.hysteresis);
+	if (ret)
+		goto unlock;
+
 	ret = thermal_zone_set_trip(tz, trip_id, &trip);
 unlock:
 	mutex_unlock(&tz->lock);
@@ -942,7 +946,8 @@ trip_point_show(struct device *dev, struct device_attribute *attr, char *buf)
 	instance =
 	    container_of(attr, struct thermal_instance, attr);
 
-	return sprintf(buf, "%d\n", instance->trip);
+	return sprintf(buf, "%d\n",
+		       thermal_zone_trip_id(instance->tz, instance->trip));
 }
 
 ssize_t

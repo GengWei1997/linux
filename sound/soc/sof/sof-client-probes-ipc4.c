@@ -125,6 +125,7 @@ static int ipc4_probes_init(struct sof_client_dev *cdev, u32 stream_tag,
 	msg.primary |= SOF_IPC4_MSG_TARGET(SOF_IPC4_MODULE_MSG);
 	msg.extension = SOF_IPC4_MOD_EXT_DST_MOD_INSTANCE(INVALID_PIPELINE_ID);
 	msg.extension |= SOF_IPC4_MOD_EXT_CORE_ID(0);
+	msg.extension |= SOF_IPC4_MOD_EXT_PARAM_SIZE(sizeof(cfg) / sizeof(uint32_t));
 
 	msg.data_size = sizeof(cfg);
 	msg.data_ptr = &cfg;
@@ -145,6 +146,9 @@ static int ipc4_probes_deinit(struct sof_client_dev *cdev)
 {
 	struct sof_man4_module *mentry = sof_ipc4_probe_get_module_info(cdev);
 	struct sof_ipc4_msg msg;
+
+	if (!mentry)
+		return -ENODEV;
 
 	msg.primary = mentry->id;
 	msg.primary |= SOF_IPC4_MSG_TYPE_SET(SOF_IPC4_MOD_DELETE_INSTANCE);
@@ -197,6 +201,9 @@ static int ipc4_probes_points_add(struct sof_client_dev *cdev,
 	struct sof_ipc4_msg msg;
 	int i, ret;
 
+	if (!mentry)
+		return -ENODEV;
+
 	/* The sof_probe_point_desc and sof_ipc4_probe_point structs
 	 * are of same size and even the integers are the same in the
 	 * same order, and similar meaning, but since there is no
@@ -246,6 +253,9 @@ static int ipc4_probes_points_remove(struct sof_client_dev *cdev,
 	struct sof_ipc4_msg msg;
 	u32 *probe_point_ids;
 	int i, ret;
+
+	if (!mentry)
+		return -ENODEV;
 
 	probe_point_ids = kcalloc(num_buffer_id, sizeof(*probe_point_ids),
 				  GFP_KERNEL);

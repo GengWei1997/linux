@@ -92,17 +92,24 @@ module_param(compress, charp, 0444);
 MODULE_PARM_DESC(compress, "compression to use");
 
 /* How much of the kernel log to snapshot */
-unsigned long kmsg_bytes = CONFIG_PSTORE_DEFAULT_KMSG_BYTES;
-module_param(kmsg_bytes, ulong, 0444);
+unsigned int kmsg_bytes = CONFIG_PSTORE_DEFAULT_KMSG_BYTES;
+module_param(kmsg_bytes, uint, 0444);
 MODULE_PARM_DESC(kmsg_bytes, "amount of kernel log to snapshot (in bytes)");
 
 static void *compress_workspace;
 
-static char *big_oops_buf;
+/*
+ * Compression is only used for dmesg output, which consists of low-entropy
+ * ASCII text, and so we can assume worst-case 60%.
+ */
+#define DMESG_COMP_PERCENT	60
 
-void pstore_set_kmsg_bytes(int bytes)
+static char *big_oops_buf;
+static size_t max_compressed_size;
+
+void pstore_set_kmsg_bytes(unsigned int bytes)
 {
-	kmsg_bytes = bytes;
+	WRITE_ONCE(kmsg_bytes, bytes);
 }
 
 /* Tag each group of saved records with a sequence number */
@@ -196,6 +203,7 @@ static int pstore_compress(const void *in, void *out,
 
 static void allocate_buf_for_compression(void)
 {
+	size_t compressed_size;
 	char *buf;
 
 	/* Skip if not built-in or compression disabled. */
@@ -216,7 +224,8 @@ static void allocate_buf_for_compression(void)
 	 * uncompressed record size, since any record that would be expanded by
 	 * compression is just stored uncompressed.
 	 */
-	buf = kvzalloc(psinfo->bufsize, GFP_KERNEL);
+	compressed_size = (psinfo->bufsize * 100) / DMESG_COMP_PERCENT;
+	buf = kvzalloc(compressed_size, GFP_KERNEL);
 	if (!buf) {
 		pr_err("Failed %zu byte compression buffer allocation for: %s\n",
 		       psinfo->bufsize, compress);
@@ -233,6 +242,7 @@ static void allocate_buf_for_compression(void)
 
 	/* A non-NULL big_oops_buf indicates compression is available. */
 	big_oops_buf = buf;
+	max_compressed_size = compressed_size;
 
 	pr_info("Using crash dump compression: %s\n", compress);
 }
@@ -246,6 +256,7 @@ static void free_buf_for_compression(void)
 
 	kvfree(big_oops_buf);
 	big_oops_buf = NULL;
+	max_compressed_size = 0;
 }
 
 void pstore_record_init(struct pstore_record *record,
@@ -267,6 +278,7 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 			enum kmsg_dump_reason reason)
 {
 	struct kmsg_dump_iter iter;
+	unsigned int	remaining = READ_ONCE(kmsg_bytes);
 	unsigned long	total = 0;
 	const char	*why;
 	unsigned int	part = 1;
@@ -289,7 +301,7 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 	kmsg_dump_rewind(&iter);
 
 	oopscount++;
-	while (total < kmsg_bytes) {
+	while (total < remaining) {
 		char *dst;
 		size_t dst_size;
 		int header_size;
@@ -305,7 +317,7 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 		record.buf = psinfo->buf;
 
 		dst = big_oops_buf ?: psinfo->buf;
-		dst_size = psinfo->bufsize;
+		dst_size = max_compressed_size ?: psinfo->bufsize;
 
 		/* Write dump header. */
 		header_size = snprintf(dst, dst_size, "%s#%d Part%u\n", why,
@@ -326,8 +338,15 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 				record.compressed = true;
 				record.size = zipped_len;
 			} else {
-				record.size = header_size + dump_size;
-				memcpy(psinfo->buf, dst, record.size);
+				/*
+				 * Compression failed, so the buffer is most
+				 * likely filled with binary data that does not
+				 * compress as well as ASCII text. Copy as much
+				 * of the uncompressed data as possible into
+				 * the pstore record, and discard the rest.
+				 */
+				record.size = psinfo->bufsize;
+				memcpy(psinfo->buf, dst, psinfo->bufsize);
 			}
 		} else {
 			record.size = header_size + dump_size;
@@ -446,6 +465,8 @@ out:
  */
 int pstore_register(struct pstore_info *psi)
 {
+	char *new_backend;
+
 	if (backend && strcmp(backend, psi->name)) {
 		pr_warn("backend '%s' already in use: ignoring '%s'\n",
 			backend, psi->name);
@@ -466,11 +487,16 @@ int pstore_register(struct pstore_info *psi)
 		return -EINVAL;
 	}
 
+	new_backend = kstrdup(psi->name, GFP_KERNEL);
+	if (!new_backend)
+		return -ENOMEM;
+
 	mutex_lock(&psinfo_lock);
 	if (psinfo) {
 		pr_warn("backend '%s' already loaded: ignoring '%s'\n",
 			psinfo->name, psi->name);
 		mutex_unlock(&psinfo_lock);
+		kfree(new_backend);
 		return -EBUSY;
 	}
 
@@ -503,7 +529,7 @@ int pstore_register(struct pstore_info *psi)
 	 * Update the module parameter backend, so it is visible
 	 * through /sys/module/pstore/parameters/backend
 	 */
-	backend = kstrdup(psi->name, GFP_KERNEL);
+	backend = new_backend;
 
 	pr_info("Registered %s as persistent store backend\n", psi->name);
 
@@ -560,6 +586,7 @@ static void decompress_record(struct pstore_record *record,
 	int ret;
 	int unzipped_len;
 	char *unzipped, *workspace;
+	size_t max_uncompressed_size;
 
 	if (!IS_ENABLED(CONFIG_PSTORE_COMPRESS) || !record->compressed)
 		return;
@@ -583,7 +610,8 @@ static void decompress_record(struct pstore_record *record,
 	}
 
 	/* Allocate enough space to hold max decompression and ECC. */
-	workspace = kvzalloc(psinfo->bufsize + record->ecc_notice_size,
+	max_uncompressed_size = 3 * psinfo->bufsize;
+	workspace = kvzalloc(max_uncompressed_size + record->ecc_notice_size,
 			     GFP_KERNEL);
 	if (!workspace)
 		return;
@@ -591,11 +619,11 @@ static void decompress_record(struct pstore_record *record,
 	zstream->next_in	= record->buf;
 	zstream->avail_in	= record->size;
 	zstream->next_out	= workspace;
-	zstream->avail_out	= psinfo->bufsize;
+	zstream->avail_out	= max_uncompressed_size;
 
 	ret = zlib_inflate(zstream, Z_FINISH);
 	if (ret != Z_STREAM_END) {
-		pr_err("zlib_inflate() failed, ret = %d!\n", ret);
+		pr_err_ratelimited("zlib_inflate() failed, ret = %d!\n", ret);
 		kvfree(workspace);
 		return;
 	}

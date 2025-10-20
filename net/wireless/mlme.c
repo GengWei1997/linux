@@ -43,16 +43,18 @@ void cfg80211_rx_assoc_resp(struct net_device *dev,
 
 	for (link_id = 0; link_id < ARRAY_SIZE(data->links); link_id++) {
 		cr.links[link_id].status = data->links[link_id].status;
+		cr.links[link_id].bss = data->links[link_id].bss;
+
 		WARN_ON_ONCE(cr.links[link_id].status != WLAN_STATUS_SUCCESS &&
 			     (!cr.ap_mld_addr || !cr.links[link_id].bss));
 
-		cr.links[link_id].bss = data->links[link_id].bss;
 		if (!cr.links[link_id].bss)
 			continue;
 		cr.links[link_id].bssid = data->links[link_id].bss->bssid;
 		cr.links[link_id].addr = data->links[link_id].addr;
 		/* need to have local link addresses for MLO connections */
-		WARN_ON(cr.ap_mld_addr && !cr.links[link_id].addr);
+		WARN_ON(cr.ap_mld_addr &&
+			!is_valid_ether_addr(cr.links[link_id].addr));
 
 		BUG_ON(!cr.links[link_id].bss->channel);
 
@@ -737,7 +739,8 @@ int cfg80211_mlme_mgmt_tx(struct cfg80211_registered_device *rdev,
 
 	mgmt = (const struct ieee80211_mgmt *)params->buf;
 
-	if (!ieee80211_is_mgmt(mgmt->frame_control))
+	if (!ieee80211_is_mgmt(mgmt->frame_control) ||
+	    ieee80211_has_order(mgmt->frame_control))
 		return -EINVAL;
 
 	stype = le16_to_cpu(mgmt->frame_control) & IEEE80211_FCTL_STYPE;

@@ -374,7 +374,7 @@ gf100_gr_chan = {
 };
 
 static int
-gf100_gr_chan_new(struct nvkm_gr *base, struct nvkm_fifo_chan *fifoch,
+gf100_gr_chan_new(struct nvkm_gr *base, struct nvkm_chan *fifoch,
 		  const struct nvkm_oclass *oclass,
 		  struct nvkm_object **pobject)
 {
@@ -443,6 +443,7 @@ gf100_gr_chan_new(struct nvkm_gr *base, struct nvkm_fifo_chan *fifoch,
 		ret = gf100_grctx_generate(gr, chan, fifoch->inst);
 		if (ret) {
 			nvkm_error(&base->engine.subdev, "failed to construct context\n");
+			mutex_unlock(&gr->fecs.mutex);
 			return ret;
 		}
 	}
@@ -2494,12 +2495,24 @@ gf100_gr_gpccs_ucode = {
 	.data.size = sizeof(gf100_grgpc_data),
 };
 
+static int
+gf100_gr_nonstall(struct nvkm_gr *base)
+{
+	struct gf100_gr *gr = gf100_gr(base);
+
+	if (gr->func->nonstall)
+		return gr->func->nonstall(gr);
+
+	return -EINVAL;
+}
+
 static const struct nvkm_gr_func
 gf100_gr_ = {
 	.dtor = gf100_gr_dtor,
 	.oneinit = gf100_gr_oneinit,
 	.init = gf100_gr_init_,
 	.fini = gf100_gr_fini,
+	.nonstall = gf100_gr_nonstall,
 	.reset = gf100_gr_reset,
 	.units = gf100_gr_units,
 	.chan_new = gf100_gr_chan_new,

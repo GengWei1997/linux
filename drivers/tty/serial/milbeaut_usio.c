@@ -148,8 +148,7 @@ static void mlb_usio_enable_ms(struct uart_port *port)
 static void mlb_usio_rx_chars(struct uart_port *port)
 {
 	struct tty_port *ttyport = &port->state->port;
-	unsigned long flag = 0;
-	char ch = 0;
+	u8 flag = 0, ch = 0;
 	u8 status;
 	int max_count = 2;
 
@@ -523,7 +522,10 @@ static int mlb_usio_probe(struct platform_device *pdev)
 	}
 	port->membase = devm_ioremap(&pdev->dev, res->start,
 				resource_size(res));
-
+	if (!port->membase) {
+		ret = -ENOMEM;
+		goto failed;
+	}
 	ret = platform_get_irq_byname(pdev, "rx");
 	mlb_usio_irq[index][RX] = ret;
 

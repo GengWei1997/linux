@@ -99,7 +99,7 @@ Root
 
 The root of the DAMON sysfs interface is ``<sysfs>/kernel/mm/damon/``, and it
 has one directory named ``admin``.  The directory contains the files for
-privileged user space programs' control of DAMON.  User space tools or deamons
+privileged user space programs' control of DAMON.  User space tools or daemons
 having the root permission could use this directory.
 
 kdamonds/
@@ -389,7 +389,7 @@ pages of all memory cgroups except ``/having_care_already``.::
     # # further filter out all cgroups except one at '/having_care_already'
     echo memcg > 1/type
     echo /having_care_already > 1/memcg_path
-    echo N > 1/matching
+    echo Y > 1/matching
 
 Note that ``anon`` and ``memcg`` filters are currently supported only when
 ``paddr`` `implementation <sysfs_contexts>` is being used.
@@ -413,7 +413,7 @@ be used for online analysis or tuning of the schemes.
 The statistics can be retrieved by reading the files under ``stats`` directory
 (``nr_tried``, ``sz_tried``, ``nr_applied``, ``sz_applied``, and
 ``qt_exceeds``), respectively.  The files are not updated in real time, so you
-should ask DAMON sysfs interface to updte the content of the files for the
+should ask DAMON sysfs interface to update the content of the files for the
 stats by writing a special keyword, ``update_schemes_stats`` to the relevant
 ``kdamonds/<N>/state`` file.
 

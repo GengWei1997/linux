@@ -87,11 +87,6 @@ static const struct mpr_func_spec mpr_func_spec[] = {
 	[MPR_FUNCTION_C] = {.output_min = 3355443, .output_max = 13421773},
 };
 
-struct mpr_chan {
-	s32			pres;		/* pressure value */
-	s64			ts;		/* timestamp */
-};
-
 struct mpr_data {
 	struct i2c_client	*client;
 	struct mutex		lock;		/*
@@ -120,7 +115,10 @@ struct mpr_data {
 						 * loop until data is ready
 						 */
 	struct completion	completion;	/* handshake from irq to read */
-	struct mpr_chan		chan;		/*
+	struct {
+		s32 pres;			/* pressure value */
+		aligned_s64 ts;			/* timestamp */
+	} chan;				/*
 						 * channel values for buffered
 						 * mode
 						 */
@@ -323,6 +321,7 @@ static int mpr_probe(struct i2c_client *client)
 	struct iio_dev *indio_dev;
 	struct device *dev = &client->dev;
 	s64 scale, offset;
+	u32 func;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_READ_BYTE))
 		return dev_err_probe(dev, -EOPNOTSUPP,
@@ -362,10 +361,11 @@ static int mpr_probe(struct i2c_client *client)
 			return dev_err_probe(dev, ret,
 				"honeywell,pmax-pascal could not be read\n");
 		ret = device_property_read_u32(dev,
-				"honeywell,transfer-function", &data->function);
+				"honeywell,transfer-function", &func);
 		if (ret)
 			return dev_err_probe(dev, ret,
 				"honeywell,transfer-function could not be read\n");
+		data->function = func - 1;
 		if (data->function > MPR_FUNCTION_C)
 			return dev_err_probe(dev, -EINVAL,
 				"honeywell,transfer-function %d invalid\n",
