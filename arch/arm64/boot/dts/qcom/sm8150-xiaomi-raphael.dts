@@ -807,7 +807,7 @@
 };
 
 &remoteproc_slpi {
-	status = "okay";
+	status = "disabled";
 	firmware-name = "qcom/sm8150/Xiaomi/raphael/slpi.mbn";
 };
 
