@@ -310,6 +310,8 @@ struct fastrpc_user {
 	spinlock_t lock;
 	/* lock for allocations */
 	struct mutex mutex;
+	/* Reference count */
+	struct kref refcount;
 };
 
 /* Extract SMMU PA from consolidated IOVA */
@@ -484,6 +486,7 @@ static void fastrpc_channel_ctx_free(struct kref *ref)
 
 	cctx = container_of(ref, struct fastrpc_channel_ctx, refcount);
 
+	idr_destroy(&cctx->ctx_idr);
 	kfree(cctx);
 }
 
@@ -497,15 +500,57 @@ static void fastrpc_channel_ctx_put(struct fastrpc_channel_ctx *cctx)
 	kref_put(&cctx->refcount, fastrpc_channel_ctx_free);
 }
 
+static void fastrpc_context_put(struct fastrpc_invoke_ctx *ctx);
+
+static void fastrpc_user_free(struct kref *ref)
+{
+	struct fastrpc_user *fl = container_of(ref, struct fastrpc_user, refcount);
+	struct fastrpc_invoke_ctx *ctx, *n;
+	struct fastrpc_map *map, *m;
+	struct fastrpc_buf *buf, *b;
+
+	if (fl->init_mem)
+		fastrpc_buf_free(fl->init_mem);
+
+	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
+		list_del(&ctx->node);
+		fastrpc_context_put(ctx);
+	}
+
+	list_for_each_entry_safe(map, m, &fl->maps, node)
+		fastrpc_map_put(map);
+
+	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
+		list_del(&buf->node);
+		fastrpc_buf_free(buf);
+	}
+
+	fastrpc_channel_ctx_put(fl->cctx);
+	mutex_destroy(&fl->mutex);
+	kfree(fl);
+}
+
+static void fastrpc_user_get(struct fastrpc_user *fl)
+{
+	kref_get(&fl->refcount);
+}
+
+static void fastrpc_user_put(struct fastrpc_user *fl)
+{
+	kref_put(&fl->refcount, fastrpc_user_free);
+}
+
 static void fastrpc_context_free(struct kref *ref)
 {
 	struct fastrpc_invoke_ctx *ctx;
 	struct fastrpc_channel_ctx *cctx;
+	struct fastrpc_user *fl;
 	unsigned long flags;
 	int i;
 
 	ctx = container_of(ref, struct fastrpc_invoke_ctx, refcount);
 	cctx = ctx->cctx;
+	fl = ctx->fl;
 
 	for (i = 0; i < ctx->nbufs; i++)
 		fastrpc_map_put(ctx->maps[i]);
@@ -521,6 +566,8 @@ static void fastrpc_context_free(struct kref *ref)
 	kfree(ctx->olaps);
 	kfree(ctx);
 
+	/* Release the reference taken in fastrpc_context_alloc() */
+	fastrpc_user_put(fl);
 	fastrpc_channel_ctx_put(cctx);
 }
 
@@ -628,6 +675,8 @@ static struct fastrpc_invoke_ctx *fastrpc_context_alloc(
 
 	/* Released in fastrpc_context_put() */
 	fastrpc_channel_ctx_get(cctx);
+	/* Take a reference to user, released in fastrpc_context_free() */
+	fastrpc_user_get(user);
 
 	ctx->sc = sc;
 	ctx->retval = -1;
@@ -658,6 +707,7 @@ err_idr:
 	spin_lock(&user->lock);
 	list_del(&ctx->node);
 	spin_unlock(&user->lock);
+	fastrpc_user_put(user);
 	fastrpc_channel_ctx_put(cctx);
 	kfree(ctx->maps);
 	kfree(ctx->olaps);
@@ -1231,7 +1281,18 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
 		if (!wait_for_completion_timeout(&ctx->work, 10 * HZ))
 			err = -ETIMEDOUT;
 	} else {
-		err = wait_for_completion_interruptible(&ctx->work);
+		/*
+		 * Raphael (sm8150) workaround: bound user-space invokes too.
+		 * A wedged DSP used to leave ssccli and friends blocked
+		 * forever, stalling hexagonrpcd jobs and leaking tasks.
+		 * 0 means timeout; a positive value means completion.
+		 */
+		err = wait_for_completion_interruptible_timeout(&ctx->work,
+							       10 * HZ);
+		if (!err)
+			err = -ETIMEDOUT;
+		else if (err > 0)
+			err = 0;
 	}
 
 	if (err)
@@ -1252,6 +1313,21 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
 bail:
 	if (err != -ERESTARTSYS && err != -ETIMEDOUT) {
 		/* We are done with this compute context */
+		spin_lock(&fl->lock);
+		list_del(&ctx->node);
+		spin_unlock(&fl->lock);
+		fastrpc_context_put(ctx);
+	} else if (err == -ETIMEDOUT) {
+		/*
+		 * Raphael (sm8150): the bounded invoke wait (10s) returned
+		 * without a response, but fastrpc_invoke_send() still holds
+		 * the in-flight reference until the late DSP response is
+		 * delivered through fastrpc_rpmsg_callback().  Release the
+		 * list reference now so the context does not leak while
+		 * waiting for that response; the response path frees it via
+		 * ctx->put_work, and the fastrpc_user refcount keeps fl
+		 * (and ctx->buf->fl) alive until then.
+		 */
 		spin_lock(&fl->lock);
 		list_del(&ctx->node);
 		spin_unlock(&fl->lock);
@@ -1579,9 +1655,6 @@ static int fastrpc_device_release(struct inode *inode, struct file *file)
 {
 	struct fastrpc_user *fl = (struct fastrpc_user *)file->private_data;
 	struct fastrpc_channel_ctx *cctx = fl->cctx;
-	struct fastrpc_invoke_ctx *ctx, *n;
-	struct fastrpc_map *map, *m;
-	struct fastrpc_buf *buf, *b;
 	unsigned long flags;
 
 	fastrpc_release_current_dsp_process(fl);
@@ -1590,28 +1663,10 @@ static int fastrpc_device_release(struct inode *inode, struct file *file)
 	list_del(&fl->user);
 	spin_unlock_irqrestore(&cctx->lock, flags);
 
-	if (fl->init_mem)
-		fastrpc_buf_free(fl->init_mem);
-
-	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
-		list_del(&ctx->node);
-		fastrpc_context_put(ctx);
-	}
-
-	list_for_each_entry_safe(map, m, &fl->maps, node)
-		fastrpc_map_put(map);
-
-	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
-		list_del(&buf->node);
-		fastrpc_buf_free(buf);
-	}
-
 	fastrpc_session_free(cctx, fl->sctx);
-	fastrpc_channel_ctx_put(cctx);
-
-	mutex_destroy(&fl->mutex);
-	kfree(fl);
 	file->private_data = NULL;
+	/* Release the reference taken in fastrpc_device_open */
+	fastrpc_user_put(fl);
 
 	return 0;
 }
@@ -1648,6 +1703,7 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 		dev_err(&cctx->rpdev->dev, "No session available\n");
 		mutex_destroy(&fl->mutex);
 		kfree(fl);
+		fastrpc_channel_ctx_put(cctx);
 
 		return -EBUSY;
 	}
@@ -1655,6 +1711,7 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 	spin_lock_irqsave(&cctx->lock, flags);
 	list_add_tail(&fl->user, &cctx->users);
 	spin_unlock_irqrestore(&cctx->lock, flags);
+	kref_init(&fl->refcount);
 
 	return 0;
 }
@@ -2392,6 +2449,36 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 
 			err = qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
 				    data->vmperms, data->vmcount);
+			if (err && data->vmcount) {
+				/*
+				 * Raphael (sm8150): after a DSP crash the secure
+				 * world may still hold ownership of the heap with
+				 * the DSP VMIDs, because the crash teardown does
+				 * not run fastrpc_rpmsg_remove() (so the reclaim
+				 * there is skipped) and the next assign fails
+				 * with -EINVAL. Reclaim ownership to HLOS and
+				 * retry the assign once.
+				 */
+				u64 reclaim_src = 0;
+				struct qcom_scm_vmperm hlos_perm = {
+					.vmid = QCOM_SCM_VMID_HLOS,
+					.perm = QCOM_SCM_PERM_RWX,
+				};
+				int i;
+
+				for (i = 0; i < data->vmcount; i++)
+					reclaim_src |= BIT(data->vmperms[i].vmid);
+
+				dev_warn(rdev, "fastrpc: scm assign failed (%d), reclaiming heap from DSP VMIDs and retrying\n", err);
+				if (!qcom_scm_assign_mem(res.start,
+						resource_size(&res),
+						&reclaim_src, &hlos_perm, 1))
+					err = qcom_scm_assign_mem(res.start,
+						resource_size(&res),
+						&src_perms,
+						data->vmperms,
+						data->vmcount);
+			}
 			if (err)
 				goto err_free_data;
 		}
@@ -2493,8 +2580,36 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 	list_for_each_entry_safe(buf, b, &cctx->invoke_interrupted_mmaps, node)
 		list_del(&buf->node);
 
-	if (cctx->remote_heap)
+	if (cctx->remote_heap) {
+		/*
+		 * Raphael (sm8150) workaround: reclaim SCM ownership of the
+		 * remote heap before freeing it. Without this, a crash-induced
+		 * teardown leaves the CMA region owned by the DSP VMIDs in the
+		 * secure world, and the next fastrpc probe fails with
+		 * "Assign memory protection call failed -22" when re-assigning
+		 * the same region (SLPI sensor init then stalls and the DSP
+		 * firmware watchdogs itself).
+		 */
+		if (cctx->vmcount) {
+			u64 src_perms = 0;
+			struct qcom_scm_vmperm dst_perms;
+			u32 i;
+
+			for (i = 0; i < cctx->vmcount; i++)
+				src_perms |= BIT(cctx->vmperms[i].vmid);
+
+			dst_perms.vmid = QCOM_SCM_VMID_HLOS;
+			dst_perms.perm = QCOM_SCM_PERM_RWX;
+			dev_info(&rpdev->dev,
+				"fastrpc: reclaiming remote heap ownership to HLOS\n");
+			if (qcom_scm_assign_mem(cctx->remote_heap->dma_addr,
+						(u64)cctx->remote_heap->size,
+						&src_perms, &dst_perms, 1))
+				dev_err(&rpdev->dev,
+					"Failed to reclaim remote heap ownership\n");
+		}
 		fastrpc_buf_free(cctx->remote_heap);
+	}
 
 	of_platform_depopulate(&rpdev->dev);
 
@@ -2512,6 +2627,9 @@ static int fastrpc_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
 
 	if (len < sizeof(*rsp))
 		return -EINVAL;
+
+	if (!cctx)
+		return -ENODEV;
 
 	ctxid = ((rsp->ctx & FASTRPC_CTXID_MASK) >> 4);
 
