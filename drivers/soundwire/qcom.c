@@ -1444,7 +1444,7 @@ static int qcom_swrm_get_port_config(struct qcom_swrm_ctrl *ctrl)
 	ret = of_property_read_u32(np, "qcom,din-ports", &val);
 	if (!ret) { /* only if present */
 		if (val != ctrl->num_din_ports) {
-			dev_err(ctrl->dev, "din-ports (%d) mismatch with controller (%d)",
+			dev_dbg(ctrl->dev, "din-ports (%d) mismatch with controller (%d)",
 				val, ctrl->num_din_ports);
 		}
 
@@ -1454,7 +1454,7 @@ static int qcom_swrm_get_port_config(struct qcom_swrm_ctrl *ctrl)
 	ret = of_property_read_u32(np, "qcom,dout-ports", &val);
 	if (!ret) { /* only if present */
 		if (val != ctrl->num_dout_ports) {
-			dev_err(ctrl->dev, "dout-ports (%d) mismatch with controller (%d)",
+			dev_dbg(ctrl->dev, "dout-ports (%d) mismatch with controller (%d)",
 				val, ctrl->num_dout_ports);
 		}
 
