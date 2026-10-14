@@ -9954,17 +9954,18 @@ static int ath10k_mac_get_wrdd_regulatory(struct ath10k *ar, u16 *rd)
 
 static int ath10k_mac_init_rd(struct ath10k *ar)
 {
-	int ret;
 	u16 rd;
 
-	ret = ath10k_mac_get_wrdd_regulatory(ar, &rd);
-	if (ret) {
-		ath10k_dbg(ar, ATH10K_DBG_BOOT,
-			   "fallback to eeprom programmed regulatory settings\n");
-		rd = ar->hw_eeprom_rd;
-	}
+	/* Device adaptation: ignore the country code (CN) reported by firmware
+	 * EEPROM/ACPI WRDD and force the Atheros world regulatory domain
+	 * (WOR4_WORLD, 0x64) so 5GHz channels are not restricted while keeping
+	 * regulatory.db. CTRY_DEFAULT (0) would map to US here. */
+	if (ath10k_mac_get_wrdd_regulatory(ar, &rd) == 0)
+		ath10k_dbg(ar, ATH10K_DBG_BOOT, "ignore WRDD country code %u\n", rd);
+	else
+		ath10k_dbg(ar, ATH10K_DBG_BOOT, "use world regulatory domain\n");
 
-	ar->ath_common.regulatory.current_rd = rd;
+	ar->ath_common.regulatory.current_rd = 0x64;
 	return 0;
 }
 
