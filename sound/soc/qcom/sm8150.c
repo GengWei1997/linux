@@ -473,7 +473,10 @@ static int sm8150_platform_probe(struct platform_device *pdev)
 	 */
 	ret = qcom_snd_parse_of(card);
 	if (ret) {
-		dev_err(dev, "qcom_snd_parse_of failed: %d\n", ret);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "qcom_snd_parse_of failed: %d\n", ret);
+		else
+			dev_dbg(dev, "qcom_snd_parse_of deferred\n");
 		return ret;
 	}
 	dev_info(dev, "qcom_snd_parse_of OK: %d links\n", card->num_links);
