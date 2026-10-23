@@ -14,6 +14,7 @@
 #include <linux/of.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/pm_domain.h>
 #include <linux/reset-controller.h>
 #include <linux/time.h>
@@ -1422,12 +1423,51 @@ static void ufs_qcom_set_caps(struct ufs_hba *hba)
 {
 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
 
-	hba->caps |= UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
-	hba->caps |= UFSHCD_CAP_CLK_SCALING | UFSHCD_CAP_WB_WITH_CLK_SCALING;
+	/*
+	 * Every runtime power saving path (clock gating from
+	 * ufshcd_gate_work() and runtime autosuspend both end up in
+	 * ufs_qcom_setup_clocks(on = false)) disables the controller clocks
+	 * and calls phy_power_off().  The QMP PHY is only programmed by the
+	 * HCE-enable path (ufs_qcom_power_up_sequence() -> phy_calibrate()),
+	 * which is not part of the runtime resume path, so once the PHY has
+	 * been powered down the link cannot be used again: the following
+	 * hibern8 exit, or the next transfer, aborts with a PA fatal error
+	 * and the link stays dead, which shows up as "unable to read
+	 * superblock" style I/O errors.
+	 *
+	 * Boards with such a PHY can request that the link, the clocks and
+	 * the PHY stay powered at all times with "qcom,no-runtime-pm".  It
+	 * disables clock gating, clock scaling and runtime autosuspend, so
+	 * that ufshcd_suspend()/ufshcd_gate_work() are never reached at
+	 * runtime.
+	 *
+	 * The auto-hibernate idle timer is disabled as well.  The controller
+	 * does enter hibern8 on its own once the link has been idle for the
+	 * programmed time, but it never leaves hibern8 again, so the first
+	 * request after an idle period is never completed: it is aborted
+	 * after 30 s, the link is declared lost and the error handler cannot
+	 * bring it back up ("EXT4-fs ... unable to read superblock").  With
+	 * the timer off the link stays active and requests are serviced
+	 * normally.  Note that the quirk used for this must not stop
+	 * ufs_qcom_link_startup_post_change() from enabling the clock
+	 * requests in UFS_AH8_CFG - link startup fails without them.
+	 *
+	 * System suspend is not affected: it goes through a complete HCE
+	 * disable/enable cycle which re-initialises the PHY.
+	 */
+	if (device_property_read_bool(hba->dev, "qcom,no-runtime-pm")) {
+		hba->quirks |= UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8;
+	} else {
+		hba->caps |= UFSHCD_CAP_CLK_GATING |
+			     UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
+		hba->caps |= UFSHCD_CAP_CLK_SCALING |
+			     UFSHCD_CAP_WB_WITH_CLK_SCALING;
+		hba->caps |= UFSHCD_CAP_RPM_AUTOSUSPEND;
+	}
+
 	hba->caps |= UFSHCD_CAP_AUTO_BKOPS_SUSPEND;
 	hba->caps |= UFSHCD_CAP_WB_EN;
 	hba->caps |= UFSHCD_CAP_AGGR_POWER_COLLAPSE;
-	hba->caps |= UFSHCD_CAP_RPM_AUTOSUSPEND;
 
 	if (host->hw_ver.major >= 0x7)
 		hba->caps |= UFSHCD_CAP_TX_EQUALIZATION;
