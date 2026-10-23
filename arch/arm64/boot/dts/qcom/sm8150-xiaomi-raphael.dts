@@ -86,6 +86,42 @@
 			linux,code = <KEY_VOLUMEUP>;
 		};
 	};
+
+	/*
+	 * The touch controller's two rails are load switches gated by TLMM
+	 * GPIOs, not PMIC regulators.  The Goodix driver asks for one supply
+	 * by name (goodix,avdd-name) and enables it around the power-on
+	 * sequence, so both switches are modelled as a single fixed
+	 * regulator.  3.3 V is the controlling rail and is enabled first;
+	 * the 1.8 V switch is left always-on because the controller has no
+	 * documented ordering requirement for it and it also feeds the
+	 * panel's I/O.
+	 */
+	ts_avdd_3p3: regulator-ts-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ts_avdd_3p3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+
+		gpio = <&tlmm 98 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	ts_vddio_1p8: regulator-ts-vddio {
+		compatible = "regulator-fixed";
+		regulator-name = "ts_vddio_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+
+		gpio = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		regulator-boot-on;
+		regulator-always-on;
+	};
 };
 
 &apps_rsc {
@@ -476,6 +512,33 @@
  */
 &tlmm {
 	gpio-reserved-ranges = <0 4>, <126 4>;
+
+	/*
+	 * Touch IRQ and reset.  The vendor tree drives both at 16 mA with a
+	 * pull-up on the active state; keep that, since the controller
+	 * samples the IRQ line during reset to pick its I2C address.
+	 */
+	ts_int_reset_default: ts-int-reset-default-state {
+		pins = "gpio122", "gpio54";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-pull-up;
+	};
+
+	ts_int_suspend: ts-int-suspend-state {
+		pins = "gpio122";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-pull-up;
+	};
+
+	ts_reset_suspend: ts-reset-suspend-state {
+		pins = "gpio54";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+		output-high;
+	};
 };
 
 /*
@@ -517,6 +580,43 @@
  */
 &i2c19 {
 	status = "okay";
+
+	/*
+	 * Goodix GT9886.  The vendor tree labels the panel "gt9889" in its
+	 * own DTS, but every firmware and config file it ships is named
+	 * goodix_gt9886_*, and the vendor driver matches both strings.
+	 *
+	 * IRQ is GPIO 122 (falling edge) and reset is GPIO 54.  Both are
+	 * handled by the driver through the gpiod API, so the node uses the
+	 * plain -gpios suffix rather than the vendor's goodix,*-gpio.
+	 */
+	touchscreen@5d {
+		compatible = "goodix,gt9886";
+		reg = <0x5d>;
+
+		interrupt-parent = <&tlmm>;
+		interrupts = <122 IRQ_TYPE_EDGE_FALLING>;
+		goodix,irq-flags = <2>;			/* falling edge */
+
+		reset-gpios = <&tlmm 54 GPIO_ACTIVE_HIGH>;
+		irq-gpios = <&tlmm 122 GPIO_ACTIVE_HIGH>;
+
+		goodix,avdd-name = "ts_avdd_3p3";
+
+		goodix,panel-max-x = <1079>;
+		goodix,panel-max-y = <2339>;
+		goodix,panel-max-w = <255>;
+		goodix,panel-max-p = <255>;
+
+		goodix,power-on-delay-us = <300000>;
+		goodix,power-off-delay-us = <5000>;
+		goodix,fw-name = "goodix_gt9886_fw_f11.bin";
+		goodix,cfg-name = "goodix_gt9886_cfg_f11.bin";
+
+		pinctrl-names = "pmx_ts_active", "pmx_ts_suspend";
+		pinctrl-0 = <&ts_int_reset_default>;
+		pinctrl-1 = <&ts_int_suspend>, <&ts_reset_suspend>;
+	};
 };
 
 /*
