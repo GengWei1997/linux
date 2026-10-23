@@ -22588,6 +22588,12 @@ F:	drivers/firmware/qcom/qcom_pas.h
 F:	drivers/firmware/qcom/qcom_pas_tee.c
 F:	include/linux/firmware/qcom/qcom_pas.h
 
+QUALCOMM PM8150B SMB5 CHARGER AND GAUGE DRIVER
+M:	GengWei1997 <gw19970326@gmail.com>
+L:	linux-arm-msm@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/power/supply/qcom,pm8150b-charger.yaml
+
 QUALCOMM SMB CHARGER DRIVER
 M:	Casey Connolly <casey.connolly@linaro.org>
 L:	linux-arm-msm@vger.kernel.org
