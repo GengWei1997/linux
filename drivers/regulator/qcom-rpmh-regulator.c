@@ -167,6 +167,7 @@ struct rpmh_vreg {
 	struct regulator_desc		rdesc;
 	const struct rpmh_vreg_hw_data	*hw_data;
 	bool				always_wait_for_ack;
+	bool				skip_readback;
 
 	int				enabled;
 	bool				bypassed;
@@ -275,6 +276,13 @@ static int rpmh_regulator_vrm_get_voltage_sel(struct regulator_dev *rdev)
 {
 	struct rpmh_vreg *vreg = rdev_get_drvdata(rdev);
 	int ret, uV = 0;
+
+	/*
+	 * Some firmware leaves the RPMH read path unusable.  On those
+	 * platforms the DT can request cached-only behaviour instead.
+	 */
+	if (vreg->skip_readback)
+		return vreg->voltage_selector;
 
 	if (vreg->voltage_selector < 0) {
 		ret = _rpmh_regulator_vrm_get_voltage(rdev, &uV);
@@ -551,6 +559,15 @@ static int rpmh_regulator_init_vreg(struct rpmh_vreg *vreg, struct device *dev,
 
 	vreg->always_wait_for_ack = of_property_read_bool(node,
 						"qcom,always-wait-for-ack");
+	/*
+	 * The quirk is normally placed on the regulators container node,
+	 * because that is the device which describes the PMIC.  Also accept
+	 * it on an individual regulator for compatibility.
+	 */
+	vreg->skip_readback = of_property_read_bool(node, "qcom,no-readback") ||
+			      (node->parent &&
+			       of_property_read_bool(node->parent,
+						     "qcom,no-readback"));
 
 	vreg->rdesc.owner	= THIS_MODULE;
 	vreg->rdesc.type	= REGULATOR_VOLTAGE;
@@ -594,6 +611,9 @@ static int rpmh_regulator_determine_initial_mode(struct rpmh_vreg *vreg)
 	};
 	int ret, pmic_mode, mode;
 	int sts;
+
+	if (vreg->skip_readback)
+		return 0;
 
 	ret = rpmh_read(vreg->dev, &cmd);
 	if (ret) {
@@ -1947,6 +1967,9 @@ static int rpmh_regulator_probe(struct platform_device *pdev)
 		dev_err(dev, "qcom,pmic-id missing in DT node\n");
 		return ret;
 	}
+
+	if (of_property_read_bool(dev->of_node, "qcom,no-readback"))
+		dev_info(dev, "RPMH readback disabled by device tree\n");
 
 	for_each_available_child_of_node_scoped(dev->of_node, node) {
 		vreg = devm_kzalloc(dev, sizeof(*vreg), GFP_KERNEL);
