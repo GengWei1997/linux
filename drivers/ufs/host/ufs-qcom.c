@@ -707,9 +707,23 @@ cfg_timers:
 
 static void ufs_qcom_link_startup_post_change(struct ufs_hba *hba)
 {
-	if (ufshcd_is_auto_hibern8_supported(hba))
-		ufshcd_rmwl(hba, UFS_HW_CLK_CTRL_EN, UFS_HW_CLK_CTRL_EN,
-			    UFS_AH8_CFG);
+	/*
+	 * The system, ICE core, UniPro core and AUX clock requests have to be
+	 * enabled for the link to come up.  This is independent of the
+	 * auto-hibernate idle timer, so the write must not be skipped when
+	 * the timer is disabled (UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8), otherwise
+	 * link startup itself fails.
+	 */
+	ufshcd_rmwl(hba, UFS_HW_CLK_CTRL_EN, UFS_HW_CLK_CTRL_EN,
+		    UFS_AH8_CFG);
+
+	/*
+	 * With the quirk set the core never programs the timer, so make sure
+	 * a value left over from the bootloader (which may have used the
+	 * controller before us) cannot arm it either.
+	 */
+	if (hba->quirks & UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8)
+		ufshcd_writel(hba, 0, REG_AUTO_HIBERNATE_IDLE_TIMER);
 }
 
 static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
