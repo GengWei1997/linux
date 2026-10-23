@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Goodix GTx8 touchscreen driver.
+#
+# This is the vendor driver for the GTx8 family (GT9886 and friends).  Its
+# register map is not the GT9xx one implemented by goodix.c -- coordinates
+# live at 0x824e and the config block at 0x8050 -- so the two drivers are
+# mutually exclusive and share no code.
+#
+config TOUCHSCREEN_GOODIX_GTX8
+	tristate "Goodix GTx8 touchscreen"
+	depends on I2C
+	depends on TOUCHSCREEN_GOODIX = n
+	help
+	  Say Y here if you have a Goodix GTx8 series touchscreen controller
+	  (GT9886, GT9889, ...) connected to your system.
+
+	  This driver implements the vendor firmware and configuration
+	  download protocol, which the generic GT9xx driver does not.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called goodix_gtx8.
+
+if TOUCHSCREEN_GOODIX_GTX8
+
+config TOUCHSCREEN_GOODIX_GTX8_UPDATE
+	bool "Goodix GTx8 firmware update support"
+	default y
+	help
+	  Say Y here to let the driver check the touch controller firmware
+	  version at probe time and download a newer image from
+	  /lib/firmware if one is present.
+
+	  The firmware image and its header layout are specific to the
+	  GTx8 family, and the download is performed through the vendor
+	  update protocol implemented by this driver.
+
+config TOUCHSCREEN_GOODIX_GTX8_GESTURE
+	bool "Goodix GTx8 gesture wakeup"
+	default n
+	help
+	  Say Y here to enable the gesture (double tap and friends) wakeup
+	  path.  This needs cooperation from the display driver, which
+	  mainline does not provide for this board yet, so it is off.
+
+	  The gesture support code is built as a separate module which
+	  registers with the touch core driver when loaded.  It can be
+	  removed without unloading the core driver.
+
+config TOUCHSCREEN_GOODIX_GTX8_TOOLS
+	bool "Goodix GTx8 debug tools"
+	default n
+	help
+	  Say Y here to expose the goodix tools character device used by
+	  Goodix's userspace diagnostic utilities.  Not needed for normal
+	  operation.
+
+endif

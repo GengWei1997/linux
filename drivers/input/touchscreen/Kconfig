@@ -398,6 +398,8 @@ config TOUCHSCREEN_GOODIX
 	  To compile this driver as a module, choose M here: the
 	  module will be called goodix.
 
+source "drivers/input/touchscreen/goodix_gtx8/Kconfig"
+
 config TOUCHSCREEN_GOODIX_BERLIN_CORE
 	tristate
 
