@@ -479,6 +479,47 @@
 };
 
 /*
+ * QUPv3 serial engines.
+ *
+ * All three GENI wrappers have to be enabled, not just the one whose SE a
+ * given peripheral sits on: of_platform_populate() skips the children of a
+ * disabled node, so a disabled wrapper produces no platform device for its
+ * i2c/spi/uart children and they never probe.
+ *
+ * The three wrappers cover:
+ *   wrap 0 (0x8c0000)  se0-se7     magnetometer (se4), BT SPI (se3)
+ *   wrap 1 (0xac0000)  se8-se12    BT HCI UART (se12)
+ *   wrap 2 (0xcc0000)  se13-se19   touchscreen (se19)
+ *
+ * The individual SE nodes are left disabled here and enabled by whatever
+ * peripheral needs them, so this file does not claim buses nobody uses.
+ *
+ * Note these nodes carry no "interconnects" property.  That is fine:
+ * of_icc_get() returns a NULL path when the property is absent and the
+ * GENI driver treats that as "no constraint to vote on".
+ */
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&qupv3_id_2 {
+	status = "okay";
+};
+
+/*
+ * The touchscreen sits on SE19 of wrapper 2.  Only the SE this board
+ * actually populates is enabled; the rest stay disabled so the kernel does
+ * not claim buses nobody wired up.
+ */
+&i2c19 {
+	status = "okay";
+};
+
+/*
  * Storage.
  *
  * The UFS device (WDC SDINDDH4 / iNAND 8521, UFS 2.1) becomes unusable once
