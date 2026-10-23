@@ -124,6 +124,19 @@ properties:
         strictly lower power state.
     $ref: /schemas/types.yaml#/definitions/flag
 
+  qcom,no-readback:
+    description: |
+        Boolean flag which indicates that the application processor cannot
+        read back the state of these regulators from RPMh.
+
+        Some firmware configurations do not hand over the RPMh read channel
+        to the OS.  A read request then times out, and because a timed-out
+        request keeps its TCS busy, every subsequent RPMh transaction
+        (including BCM votes) fails as well.  On such platforms the driver
+        must report the cached voltage and enable state instead of issuing
+        read requests.
+    $ref: /schemas/types.yaml#/definitions/flag
+
   vdd-flash-supply:
     description: Input supply phandle of flash.
 
