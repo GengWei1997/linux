@@ -29868,6 +29868,12 @@ F:	fs/xfs/
 F:	include/uapi/linux/dqblk_xfs.h
 F:	include/uapi/linux/fsmap.h
 
+XIAOMI REDMI K20 PRO (RAPHAEL) DEVICE TREE
+M:	GengWei1997 <gw19970326@gmail.com>
+L:	linux-arm-msm@vger.kernel.org
+S:	Maintained
+F:	arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+
 XILINX AMS DRIVER
 M:	Sai Krishna Potthuri <sai.krishna.potthuri@amd.com>
 M:	Conall O'Griofa <conall.ogriofa@amd.com>
