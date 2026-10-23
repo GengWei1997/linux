@@ -22593,6 +22593,7 @@ M:	GengWei1997 <gw19970326@gmail.com>
 L:	linux-arm-msm@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/power/supply/qcom,pm8150b-charger.yaml
+F:	drivers/power/supply/qcom_pm8150b_charger.c
 
 QUALCOMM SMB CHARGER DRIVER
 M:	Casey Connolly <casey.connolly@linaro.org>

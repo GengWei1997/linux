@@ -1181,6 +1181,17 @@ config CHARGER_QCOM_SMB2
 	  adds support for the SMB2 switch mode battery charger found
 	  in PMI8998 and related PMICs.
 
+config CHARGER_QCOM_PM8150B
+	tristate "Qualcomm PM8150B SMB5 charger and gauge driver"
+	depends on MFD_SPMI_PMIC
+	depends on OF
+	help
+	  Say Y here to enable the Qualcomm PM8150B battery charger and
+	  fuel gauge.  The PM8150B combines an SMB5 switch-mode charger
+	  with a GEN4 gauge; this driver reports battery state of charge,
+	  voltage and temperature, reports USB presence and runs a safe
+	  CC/CV charge.  It is used on the Xiaomi Redmi K20 Pro (raphael).
+
 config FUEL_GAUGE_MM8013
 	tristate "Mitsumi MM8013 fuel gauge driver"
 	depends on I2C
