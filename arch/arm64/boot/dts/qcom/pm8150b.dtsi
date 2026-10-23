@@ -137,6 +137,12 @@
 				qcom,pre-scaling = <1 1>;
 				label = "chg_temp";
 			};
+
+			channel@83 {
+				reg = <ADC5_VPH_PWR>;
+				qcom,pre-scaling = <1 3>;
+				label = "vph_pwr";
+			};
 		};
 
 		pm8150b_adc_tm: adc-tm@3500 {
@@ -157,6 +163,12 @@
 			#gpio-cells = <2>;
 			interrupt-controller;
 			#interrupt-cells = <2>;
+		};
+
+		pm8150b_charger: qcom,pm8150b-charger {
+			compatible = "qcom,pm8150b-charger";
+			reg = <0x1000>;
+			status = "disabled";
 		};
 	};
 
