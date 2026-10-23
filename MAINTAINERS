@@ -11123,6 +11123,12 @@ M:	Maud Spierings <maudspierings@gocontroll.com>
 S:	Maintained
 F:	Documentation/devicetree/bindings/connector/gocontroll,moduline-module-slot.yaml
 
+GOODIX GT9886 TOUCHSCREEN DRIVER
+M:	GengWei1997 <gw19970326@gmail.com>
+L:	linux-input@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/input/touchscreen/goodix,gt9886.yaml
+
 GOODIX TOUCHSCREEN
 M:	Hans de Goede <hansg@kernel.org>
 L:	linux-input@vger.kernel.org

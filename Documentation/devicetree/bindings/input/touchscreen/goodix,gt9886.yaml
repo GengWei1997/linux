@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/touchscreen/goodix,gt9886.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Goodix GTx8 series I2C touchscreen controller
+
+maintainers:
+  - GengWei1997 <gw19970326@gmail.com>
+
+description: |
+  The GTx8 family (GT9886 and related parts) speaks a different register
+  protocol from the GT9xx controllers handled by goodix.yaml.  Coordinates
+  are read from 0x824e and the configuration block is uploaded to 0x8050,
+  where the GT9xx parts use 0x814e and 0x8047.
+
+allOf:
+  - $ref: touchscreen.yaml#
+
+properties:
+  compatible:
+    enum:
+      - goodix,gt9886
+      - goodix,gt9889
+
+  reg:
+    enum: [ 0x14, 0x5d ]
+
+  interrupts:
+    maxItems: 1
+
+  reset-gpios:
+    maxItems: 1
+    description: GPIO connected to the controller's reset line.
+
+  irq-gpios:
+    maxItems: 1
+    description: |
+      GPIO connected to the controller's interrupt line.  The line is also
+      sampled during reset to select the I2C address, so the driver keeps a
+      descriptor for it rather than using the interrupt parent directly.
+
+  vdd-gpios:
+    maxItems: 1
+    description: GPIO that enables the digital supply rail, if switched.
+
+  avdd-gpios:
+    maxItems: 1
+    description: GPIO that enables the analog supply rail, if switched.
+
+  goodix,avdd-name:
+    description: |
+      Name of the regulator that supplies the analog rail, as passed to
+      devm_regulator_get().  The driver enables it around the power-on
+      sequence.
+
+  goodix,irq-flags:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [ 1, 2, 4, 5 ]
+    description: |
+      Interrupt trigger type: 1 = rising edge, 2 = falling edge,
+      4 = high level, 5 = low level.
+
+  goodix,panel-max-x:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Highest X coordinate the panel reports.
+
+  goodix,panel-max-y:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Highest Y coordinate the panel reports.
+
+  goodix,panel-max-w:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Largest contact width the panel reports.
+
+  goodix,panel-max-p:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Largest pressure value the panel reports.
+
+  goodix,power-on-delay-us:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Delay after enabling the rails, in microseconds.
+
+  goodix,power-off-delay-us:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Delay after disabling the rails, in microseconds.
+
+  goodix,cfg-name:
+    $ref: /schemas/types.yaml#/definitions/string
+    description: |
+      Firmware file holding the panel configuration block.  Optional; the
+      controller keeps its factory configuration when this is not found.
+
+  goodix,fw-name:
+    $ref: /schemas/types.yaml#/definitions/string
+    description: Firmware image used by the optional update path.
+
+  goodix,swap-axis:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Swap the X and Y axes.
+
+  goodix,x2x:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Invert the X axis.
+
+  goodix,y2y:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Invert the Y axis.
+
+  goodix,pen-enable:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Enable the stylus/pen input device.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - reset-gpios
+  - irq-gpios
+  - goodix,irq-flags
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        touchscreen@5d {
+            compatible = "goodix,gt9886";
+            reg = <0x5d>;
+
+            interrupt-parent = <&tlmm>;
+            interrupts = <122 IRQ_TYPE_EDGE_FALLING>;
+            goodix,irq-flags = <2>;
+
+            reset-gpios = <&tlmm 54 GPIO_ACTIVE_HIGH>;
+            irq-gpios = <&tlmm 122 GPIO_ACTIVE_HIGH>;
+            vdd-gpios = <&tlmm 98 GPIO_ACTIVE_HIGH>;
+            avdd-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+
+            goodix,avdd-name = "ts_avdd_3p3";
+            goodix,panel-max-x = <1079>;
+            goodix,panel-max-y = <2339>;
+            goodix,panel-max-w = <255>;
+            goodix,panel-max-p = <255>;
+            goodix,power-on-delay-us = <300000>;
+            goodix,power-off-delay-us = <5000>;
+        };
+    };
+
+...
