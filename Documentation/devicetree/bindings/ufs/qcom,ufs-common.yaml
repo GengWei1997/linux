@@ -61,6 +61,21 @@ properties:
     description:
       GPIO connected to the RESET pin of the UFS memory device.
 
+  qcom,no-runtime-pm:
+    type: boolean
+    description: |
+      Keep the link, the host clocks and the PHY powered at all times.
+
+      The QMP UFS PHY is calibrated from the HCE-enable path only.  On
+      platforms where a runtime power transition powers the PHY down, the
+      next hibern8 exit or transfer aborts with a PA fatal error and the
+      link never recovers, because the calibration is not part of the
+      runtime resume path.  Such boards can disable clock gating, clock
+      scaling, runtime autosuspend and the auto-hibernate timer here, so
+      the link is never torn down at runtime.  System suspend is not
+      affected: it runs a full HCE disable/enable cycle which
+      re-initialises the PHY.
+
 allOf:
   - $ref: ufs-common.yaml
 
