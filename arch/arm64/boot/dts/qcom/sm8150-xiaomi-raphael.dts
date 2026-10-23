@@ -53,6 +53,20 @@
 		stdout-path = "serial0:115200n8";
 	};
 
+	/*
+	 * The K20 Pro ships with two cell variants; both are 4000 mAh with
+	 * the same 4.4 V maximum, so one description covers them both.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4400000>;
+		constant-charge-voltage-max-microvolt = <4400000>;
+		constant-charge-current-max-microamp = <2000000>;
+		charge-full-design-microamp-hours = <4000000>;
+	};
+
 	vph_pwr: vph-pwr-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "vph_pwr";
@@ -689,4 +703,19 @@
 
 	vdda-phy-supply = <&vreg_l5a_0p875>;
 	vdda-pll-supply = <&vreg_l12a_1p8>;
+};
+
+/*
+ * PM8150B SMB5 charger and GEN4 fuel gauge.
+ *
+ * The float voltage comes from the battery description above and is the
+ * battery's 4.4 V maximum, which is the primary over-charge protection:
+ * the hardware stops charging there whatever the software does.  The input
+ * current limit is deliberately left to the charger's own source detection,
+ * so a plain USB port is never asked for more than it advertised.
+ */
+&pm8150b_charger {
+	status = "okay";
+
+	monitored-battery = <&battery>;
 };
