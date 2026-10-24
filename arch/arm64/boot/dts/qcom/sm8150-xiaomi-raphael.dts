@@ -416,8 +416,18 @@
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
+		/*
+		 * VDD_CH0: the WCN3990 PA / RF chain rail.  Stock runs it
+		 * at 3.312 V whenever the BT half is powered
+		 * (bt-vdd-ldo-voltage-level) and allows 3.104-3.312 V on
+		 * the WLAN side (qcom,vdd-3.3-ch0-config).  The 3.0 V
+		 * minimum here made the enabled rail sit below the stock
+		 * floor.  hci_qca keeps the BT half powered from boot on,
+		 * so this board is always in the stock 3.312 V case; pin
+		 * the rail to that.
+		 */
 		vreg_l11c_3p3: ldo11 {
-			regulator-min-microvolt = <3000000>;
+			regulator-min-microvolt = <3312000>;
 			regulator-max-microvolt = <3312000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
@@ -484,7 +494,18 @@
 };
 
 &remoteproc_mpss {
-	status = "disabled";
+	/*
+	 * The WLAN/BT firmware (wlanmdsp.mbn) is fetched and started by the
+	 * modem processor, so the modem has to run for WiFi to work.  The
+	 * modem image from the phone's modem partition is squashed into a
+	 * single .mbn and installed in the qcom/<soc>/<vendor>/<model>
+	 * firmware layout used upstream for device-signed images (like
+	 * qcom/glymur/ASUSTeK/UX3607OA/), next to the WLAN image it serves;
+	 * tqftpserv resolves the modem's file requests relative to this
+	 * firmware-name.
+	 */
+	firmware-name = "qcom/sm8150/Xiaomi/raphael/modem.mbn";
+	status = "okay";
 };
 
 &remoteproc_slpi {
@@ -492,7 +513,17 @@
 };
 
 &wifi {
-	status = "disabled";
+	status = "okay";
+
+	/*
+	 * No local-mac-address on purpose (see the bluetooth node): the
+	 * factory WLAN MAC is per-device and provisioned at runtime from
+	 * the modem NV store by the raphael-macaddr service (ip link).
+	 */
+	vdd-0.8-cx-mx-supply = <&vreg_l1a_0p75>;
+	vdd-1.8-xo-supply = <&vreg_l7a_1p8>;
+	vdd-1.3-rfa-supply = <&vreg_l2c_1p3>;
+	vdd-3.3-ch0-supply = <&vreg_l11c_3p3>;
 };
 
 &pon_pwrkey {
@@ -516,16 +547,84 @@
 	linux,code = <KEY_VOLUMEDOWN>;
 };
 
+/*
+ * Bluetooth.  The BT half of the WCN3990 hangs off QUPv3 SE13 in 4-wire
+ * UART mode with hardware flow control (gpio43-46); this is the port the
+ * vendor tree aliases as "hsuart0" and gives the BT in-band-sleep wakeup
+ * byte.  SE12 (uart2) is the plain debug UART and has no BT behind it.
+ */
+&uart13 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&qup_uart13_4pin>;
+
+	bluetooth {
+		compatible = "qcom,wcn3990-bt";
+
+		/*
+		 * NVM config first, rampatch second; both relative to the
+		 * qca/ subdir under lib/firmware.  The board-id variant
+		 * lookup (stem form) is a dead end on this ROM (0x1001):
+		 * qca_read_fw_board_id times out and wedges the controller,
+		 * so the names are pinned with their extensions -- same
+		 * reasoning as the ath10k side (board_id 0xff = use the
+		 * plain board file).
+		 *
+		 * No local-bd-address on purpose: this DTS is shared by
+		 * every K20 Pro and the factory BD address is per-device.
+		 * It is provisioned at runtime from the modem NV store
+		 * (QMI DMS) via MGMT_OP_SET_PUBLIC_ADDRESS; see the
+		 * raphael-macaddr service in the k20pro-linux repo.
+		 */
+		firmware-name = "crnv21.bin", "crbtfw21.tlv";
+
+		vddio-supply = <&vreg_l7a_1p8>;
+		vddxo-supply = <&vreg_l7a_1p8>;
+		vddrf-supply = <&vreg_l2c_1p3>;
+		vddch0-supply = <&vreg_l11c_3p3>;
+
+		max-speed = <3200000>;
+	};
+};
+
 &uart2 {
 	status = "okay";
 };
-
 /*
  * GPIOs 0-3 and 126-129 are reserved for the bootloader/secure world; the
  * kernel must not drive them.  Same ranges the other SM8150 boards use.
  */
 &tlmm {
 	gpio-reserved-ranges = <0 4>, <126 4>;
+
+	/*
+	 * QUPv3 SE13 in 4-wire UART mode: the BT half of the WCN3990.  The
+	 * vendor tree splits this over three states (ctsrx/rts/tx) with the
+	 * biases below; the SoC file only describes the SE13 I2C/SPI muxing.
+	 */
+	qup_uart13_4pin: qup-uart13-4pin-state {
+		qup_uart13_cts_rx: cts-rx-pins {
+			pins = "gpio43", "gpio46";
+			function = "qup13";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		qup_uart13_rts: rts-pins {
+			pins = "gpio44";
+			function = "qup13";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		qup_uart13_tx: tx-pins {
+			pins = "gpio45";
+			function = "qup13";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
 
 	/*
 	 * Touch IRQ and reset.  The vendor tree drives both at 16 mA with a
