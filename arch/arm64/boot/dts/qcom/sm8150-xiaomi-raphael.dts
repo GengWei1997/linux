@@ -588,8 +588,16 @@
 	};
 };
 
+/*
+ * SE12 is the plain debug UART (serial0/stdout-path above); keep it as
+ * a fallback console on the debug header.
+ */
 &uart2 {
+	compatible = "qcom,geni-uart";
 	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&qup_uart12_default>;
 };
 /*
  * GPIOs 0-3 and 126-129 are reserved for the bootloader/secure world; the
@@ -597,6 +605,17 @@
  */
 &tlmm {
 	gpio-reserved-ranges = <0 4>, <126 4>;
+
+	/*
+	 * QUPv3 SE12 in 2-wire UART mode: the debug UART on the debug
+	 * header (gpio85/86), muxed to "qup12" at 2 mA like the vendor tree.
+	 */
+	qup_uart12_default: qup-uart12-default-state {
+		pins = "gpio85", "gpio86";
+		function = "qup12";
+		drive-strength = <2>;
+		bias-disable;
+	};
 
 	/*
 	 * QUPv3 SE13 in 4-wire UART mode: the BT half of the WCN3990.  The
