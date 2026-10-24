@@ -811,6 +811,17 @@ static void ath10k_qmi_event_server_arrive(struct ath10k_qmi *qmi)
 	struct ath10k_snoc *ar_snoc = ath10k_snoc_priv(ar);
 	int ret;
 
+	/*
+	 * The firmware starts bringing up the radio as soon as the host has
+	 * completed the QMI handshake below, so make sure the chip is powered
+	 * and its reference clock is running first.
+	 */
+	ret = ath10k_snoc_power_on(ar);
+	if (ret) {
+		ath10k_err(ar, "failed to power on device: %d\n", ret);
+		return;
+	}
+
 	ret = ath10k_qmi_ind_register_send_sync_msg(qmi);
 	if (ret)
 		return;
@@ -913,6 +924,8 @@ static void ath10k_qmi_event_server_exit(struct ath10k_qmi *qmi)
 
 	ath10k_snoc_fw_indication(ar, ATH10K_QMI_EVENT_FW_DOWN_IND);
 	ath10k_dbg(ar, ATH10K_DBG_QMI, "wifi fw qmi service disconnected\n");
+
+	ath10k_snoc_power_off(ar);
 }
 
 static void ath10k_qmi_event_msa_ready(struct ath10k_qmi *qmi)

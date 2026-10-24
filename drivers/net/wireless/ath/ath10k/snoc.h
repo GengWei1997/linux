@@ -97,5 +97,7 @@ static inline struct ath10k_snoc *ath10k_snoc_priv(struct ath10k *ar)
 
 int ath10k_snoc_fw_indication(struct ath10k *ar, u64 type);
 void ath10k_snoc_fw_crashed_dump(struct ath10k *ar);
+int ath10k_snoc_power_on(struct ath10k *ar);
+int ath10k_snoc_power_off(struct ath10k *ar);
 
 #endif /* _SNOC_H_ */

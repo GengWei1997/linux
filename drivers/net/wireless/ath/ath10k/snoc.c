@@ -1019,7 +1019,7 @@ static int ath10k_snoc_wlan_enable(struct ath10k *ar,
 				       NULL);
 }
 
-static int ath10k_hw_power_on(struct ath10k *ar)
+int ath10k_snoc_power_on(struct ath10k *ar)
 {
 	struct ath10k_snoc *ar_snoc = ath10k_snoc_priv(ar);
 	int ret;
@@ -1048,7 +1048,7 @@ pwrseq_off:
 	return ret;
 }
 
-static int ath10k_hw_power_off(struct ath10k *ar)
+int ath10k_snoc_power_off(struct ath10k *ar)
 {
 	struct ath10k_snoc *ar_snoc = ath10k_snoc_priv(ar);
 	int ret_seq = 0;
@@ -1087,7 +1087,7 @@ static void ath10k_snoc_hif_power_down(struct ath10k *ar)
 
 	ath10k_snoc_wlan_disable(ar);
 	ath10k_ce_free_rri(ar);
-	ath10k_hw_power_off(ar);
+	ath10k_snoc_power_off(ar);
 }
 
 static int ath10k_snoc_hif_power_up(struct ath10k *ar,
@@ -1098,7 +1098,7 @@ static int ath10k_snoc_hif_power_up(struct ath10k *ar,
 	ath10k_dbg(ar, ATH10K_DBG_SNOC, "%s:WCN3990 driver state = %d\n",
 		   __func__, ar->state);
 
-	ret = ath10k_hw_power_on(ar);
+	ret = ath10k_snoc_power_on(ar);
 	if (ret) {
 		ath10k_err(ar, "failed to power on device: %d\n", ret);
 		return ret;
@@ -1127,7 +1127,7 @@ err_free_rri:
 	ath10k_snoc_wlan_disable(ar);
 
 err_hw_power_off:
-	ath10k_hw_power_off(ar);
+	ath10k_snoc_power_off(ar);
 
 	return ret;
 }
