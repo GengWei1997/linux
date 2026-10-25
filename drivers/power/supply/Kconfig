@@ -1184,6 +1184,7 @@ config CHARGER_QCOM_SMB2
 config CHARGER_QCOM_PM8150B
 	tristate "Qualcomm PM8150B SMB5 charger and gauge driver"
 	depends on MFD_SPMI_PMIC
+	depends on IIO
 	depends on OF
 	help
 	  Say Y here to enable the Qualcomm PM8150B battery charger and
@@ -1191,6 +1192,17 @@ config CHARGER_QCOM_PM8150B
 	  with a GEN4 gauge; this driver reports battery state of charge,
 	  voltage and temperature, reports USB presence and runs a safe
 	  CC/CV charge.  It is used on the Xiaomi Redmi K20 Pro (raphael).
+
+config CHARGER_QCOM_SMB1390
+	tristate "Qualcomm SMB1390 charge pump driver"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Say Y here to enable the Qualcomm SMB1390 switched-capacitor
+	  charge pump driver.  The pump halves the charge current the
+	  buck charger has to convert from a 9 V adapter.  It is reached
+	  over I2C and offers its switcher as a current-limited regulator
+	  for the charger driver to arm.
 
 config FUEL_GAUGE_MM8013
 	tristate "Mitsumi MM8013 fuel gauge driver"

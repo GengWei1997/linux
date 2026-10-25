@@ -14,12 +14,15 @@
  * battery state of charge, voltage and temperature, report the source that
  * was plugged in, and run a safe CC/CV charge with the limits the battery
  * profile asks for, derated by the profile's JEITA and step-charging
- * tables.  OTG boost is left to the hardware defaults and is not driven
- * from software here.
+ * tables.  On boards that fit an SMB1390 charge pump, the pump takes the
+ * charge path over from the buck converter at the 9 V input class, see
+ * chg_cp_enable().  OTG boost is left to the hardware defaults and is not
+ * driven from software here.
  */
 
 #include <linux/bitfield.h>
 #include <linux/delay.h>
+#include <linux/iio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -130,6 +133,21 @@
 
 /* MISC peripheral (0x1600) */
 #define WD_CFG				0x1651
+
+/*
+ * The SMB1390 charge pump's SMB_EN pin.  MISC_SMB_CFG routes the pin to
+ * the pump and MISC_SMB_EN_CMD says who drives it: with EN_CP_CMD set the
+ * hardware raises it while charging is active, and the override bits take
+ * the pin over and park it low when the pump is not to run.  The pump is
+ * armed underneath the pin separately, see chg_cp_enable().
+ */
+#define MISC_SMB_EN_CMD			0x1648
+#define SMB_EN_OVERRIDE_VALUE		BIT(4)
+#define SMB_EN_OVERRIDE			BIT(3)
+#define EN_CP_CMD			BIT(0)
+
+#define MISC_SMB_CFG			0x1690
+#define SMB_EN_SEL			BIT(4)
 
 /* ========================== GEN4 gauge registers ======================= */
 /* fg-batt-soc (0x4000) */
@@ -246,6 +264,50 @@
 #define ICL_QC3_BOOST_UA		1000000
 
 /*
+ * The SMB1390 charge pump is a 2:1 switched-capacitor divider: it feeds
+ * the system rail at half the input voltage and draws half the charge
+ * current from the adapter.  Its input limit is therefore the smaller of
+ * what the source may deliver and half the charge current, and below
+ * 900 mA the limit falls outside the pump's accurate range, where the
+ * buck charger carries the charge alone.  The pump only clears the cell
+ * once its output is above the battery voltage, so it takes over at the
+ * 9 V input class and comes off again below it.
+ */
+#define CP_INPUT_MIN_UV			9000000
+#define CP_ILIM_MIN_UA			900000
+
+/*
+ * Starting the pump takes several register writes against the PMIC
+ * charger, whose state-change interrupt re-runs the poll that is doing
+ * the starting.  A pump that refused to start is therefore left alone
+ * for a while instead of being hammered, and tried again on a later poll.
+ */
+#define CP_RETRY_MS			10000
+
+/*
+ * Arming and converting are separated by the switcher's soft-start, and
+ * the writes that arm it wake the same poll that checks on it.  A verdict
+ * passed inside that window would be about a switcher still starting up.
+ */
+#define CP_SS_GRACE_MS			2000
+
+/*
+ * What the QC class says was asked of the adapter and what the input
+ * actually carries only disagree when a source has dropped out of its
+ * class: a load step sends a marginal adapter back to 5 V, and the class
+ * state goes stale with it.  A gap this wide is the wire telling the
+ * truth against a register that is not.
+ */
+#define QC_CLASS_TOL_UV			1500000
+
+/*
+ * One gap between the class and the wire is not enough to act on: right
+ * after the walk the adapter is still slewing up to the class.  Two in a
+ * row is a source that is really not there.
+ */
+#define QC_CLASS_BAD_SAMPLES		2
+
+/*
  * The charger switcher wants a frequency picked for the input voltage it
  * is stepping down: the vendor walks it up in the "5 V", "6-8 V" and
  * "9 V" steps of its frequency table as VBUS climbs.  DCDC_FSW_SEL holds
@@ -321,6 +383,7 @@ struct pm8150b_chg {
 	int			usb_present;	/* last plug state seen */
 	int			src_type;	/* last source class reported */
 	int			src_voltage_uv;	/* last QC class reported */
+	int			class_bad;	/* class/wire gaps in a row */
 	int			qc3_pulses;	/* QC3 steps sent so far */
 	bool			qc3_boosting;	/* QC3 burst owns the input limit */
 	bool			detecting;	/* source detection drives D+/D- */
@@ -336,6 +399,26 @@ struct pm8150b_chg {
 	 */
 	struct regulator	*dpdm;
 	bool			dpdm_held;
+
+	/*
+	 * The SMB1390 charge pump and the limits that go with it, see
+	 * chg_cp_enable().
+	 */
+	struct regulator	*cp;
+	bool			cp_active;	/* pump is armed by us */
+	bool			cp_converting;	/* switcher carries the charge */
+	unsigned int		cp_ilim_ua;	/* the pump's input limit */
+	unsigned int		cp_fcc_ua;	/* ceiling with the pump */
+	unsigned long		cp_retry_jiff;	/* earliest start retry */
+	unsigned long		cp_arm_jiff;	/* when the pump was armed */
+	bool			src_qc3;	/* QC3 source on the input */
+
+	/*
+	 * The measured input voltage, on boards that wire it up.  The QC
+	 * class says what was asked of the adapter; this says what the
+	 * wire carries, see chg_get_vbus_uv().
+	 */
+	struct iio_channel	*vbus;
 
 	/* Requested IRQs, held for the unload sequence, see chg_remove(). */
 	int			*irqs;
@@ -896,6 +979,28 @@ static int chg_set_icl(struct pm8150b_chg *chg, unsigned int icl_ua)
 }
 
 /*
+ * The input voltage the wire actually carries, in microvolts.  The QC
+ * class says what was asked of the adapter; this is what the source
+ * really delivers, and the two disagree whenever a source drops out of
+ * its class.  Boards that do not wire the ADC simply have no second
+ * opinion.
+ */
+static int chg_get_vbus_uv(struct pm8150b_chg *chg, int *vbus_uv)
+{
+	int val, rc;
+
+	if (!chg->vbus)
+		return -ENODATA;
+
+	rc = iio_read_channel_processed(chg->vbus, &val);
+	if (rc < 0)
+		return rc;
+
+	*vbus_uv = val;
+	return 0;
+}
+
+/*
  * Take the current the plugged-in source is good for, and ask a QC2 adapter
  * for the higher voltage class.  Detection settles some time after the plug
  * event, so this runs again on every poll.  True is returned when the
@@ -905,7 +1010,7 @@ static bool chg_update_input(struct pm8150b_chg *chg)
 {
 	struct chg_source src;
 	bool changed;
-	int rc;
+	int vbus_uv, rc;
 
 	rc = chg_read_source(chg, &src);
 	if (rc < 0)
@@ -920,8 +1025,35 @@ static bool chg_update_input(struct pm8150b_chg *chg)
 	if (!src.qc3 && !chg->qc3_boosting)
 		chg->qc3_pulses = 0;
 
+	/*
+	 * The class register is not the wire.  When the input sits near the
+	 * default while the class says otherwise, the adapter has dropped
+	 * out: a load step sends a marginal source back to 5 V, and the
+	 * class state is stale with it.  Two samples in a row are a real
+	 * gap -- the adapter is still slewing up right after the walk --
+	 * and then the class starts over from what the wire says, which
+	 * re-arms the walk below.
+	 */
+	if (!chg->qc3_boosting && !chg_get_vbus_uv(chg, &vbus_uv)) {
+		if (src.voltage_uv - vbus_uv > QC_CLASS_TOL_UV) {
+			if (++chg->class_bad >= QC_CLASS_BAD_SAMPLES) {
+				chg->class_bad = 0;
+				if (src.qc3) {
+					chg->qc3_pulses = 0;
+					src.voltage_uv = 5000000;
+				} else {
+					src.voltage_uv = vbus_uv;
+				}
+			}
+		} else {
+			chg->class_bad = 0;
+		}
+	}
+
 	changed = src.type != chg->src_type ||
 		  src.voltage_uv != chg->src_voltage_uv;
+
+	chg->src_qc3 = src.qc3;
 
 	/* The verdict is what decides who may drive D+/D-. */
 	chg_dpdm_policy(chg, &src);
@@ -940,12 +1072,12 @@ static bool chg_update_input(struct pm8150b_chg *chg)
 
 	/*
 	 * A QC2 adapter waits at 5 V to be asked for more, so ask.  The
-	 * command is a one-shot on the wire, so keep asking while the answer
-	 * is still 5 V; the pulse counter caps the answer at the 9 V class,
-	 * which is all the 4.4 V cell needs and keeps the switcher well
-	 * inside its range.
+	 * command is a one-shot on the wire, so keep asking while the
+	 * answer is still the default; the pulse counter caps the answer at
+	 * the 9 V class, which is all the 4.4 V cell needs and keeps the
+	 * switcher well inside its range.
 	 */
-	if (src.qc2 && src.voltage_uv == 5000000) {
+	if (src.qc2 && src.voltage_uv < 6000000) {
 		rc = chg_write(chg, CMD_HVDCP_2, HVDCP_FORCE_9V);
 		if (rc < 0)
 			dev_warn(chg->dev,
@@ -1055,6 +1187,139 @@ static int chg_table_lookup(struct chg_table *tbl, int reading, int hyst,
 	return 0;
 }
 
+/* --------------------------- charge pump ----------------------------- */
+
+/*
+ * The pump only clears the cell from the 9 V class: at the 5 V class a
+ * 2:1 divider cannot make the window above the battery.  The class
+ * register says what was asked of the adapter; the wire has to agree
+ * before the pump is started on it -- but within the class tolerance, as
+ * a loaded 9 V line sits a little below its nominal figure.  A board
+ * without the ADC has only the class to go by.
+ */
+static bool chg_cp_vbus_ok(struct pm8150b_chg *chg)
+{
+	int vbus_uv;
+
+	if (chg_get_vbus_uv(chg, &vbus_uv))
+		return true;
+
+	return vbus_uv >= CP_INPUT_MIN_UV - QC_CLASS_TOL_UV;
+}
+
+/* Whether the pump is actually carrying the charge right now. */
+static bool chg_cp_converting(struct pm8150b_chg *chg)
+{
+	return chg->cp_active && regulator_is_enabled(chg->cp) > 0;
+}
+
+/*
+ * The pump's input current limit is the smaller of what the source may
+ * deliver and half the charge current, the pump being a 2:1 divider.  A
+ * zero answer means the input limit is not known, which is not a state
+ * the pump may be started in.
+ */
+static unsigned int chg_cp_ilim_ua(struct pm8150b_chg *chg)
+{
+	unsigned int icl_ua = chg->icl_ua;
+
+	if (!icl_ua && chg_get_icl(chg, &icl_ua))
+		return 0;
+
+	return min(icl_ua, chg->eff_fcc_ua / 2);
+}
+
+static void chg_cp_update_ilim(struct pm8150b_chg *chg)
+{
+	unsigned int ilim_ua = chg_cp_ilim_ua(chg);
+	int rc;
+
+	if (ilim_ua == chg->cp_ilim_ua)
+		return;
+
+	rc = regulator_set_current_limit(chg->cp, ilim_ua, ilim_ua);
+	if (rc < 0) {
+		dev_warn(chg->dev, "failed to limit the pump to %u uA\n",
+			 ilim_ua);
+		return;
+	}
+
+	chg->cp_ilim_ua = ilim_ua;
+}
+
+/*
+ * Take the charge path over to the pump.  The pin that really starts it
+ * belongs to the hardware: SMB_EN is routed to the pump and raised by the
+ * PMIC while charging is active, so arming the switcher underneath it is
+ * all software has to do.  On the way out the pin is parked low, so a
+ * charger that has not armed the pump never feeds it.
+ */
+static int chg_cp_enable(struct pm8150b_chg *chg)
+{
+	unsigned int ilim_ua = chg_cp_ilim_ua(chg);
+	int rc;
+
+	/*
+	 * The pump's limit is programmed first: a pump that cannot be
+	 * limited is never started, and the pin is only routed over after
+	 * that is settled.
+	 */
+	rc = regulator_set_current_limit(chg->cp, ilim_ua, ilim_ua);
+	if (rc < 0)
+		return rc;
+
+	rc = chg_masked_write(chg, MISC_SMB_CFG, SMB_EN_SEL, SMB_EN_SEL);
+	if (rc < 0)
+		return rc;
+
+	rc = chg_masked_write(chg, MISC_SMB_EN_CMD,
+			      SMB_EN_OVERRIDE | SMB_EN_OVERRIDE_VALUE, 0);
+	if (rc < 0)
+		return rc;
+
+	rc = chg_masked_write(chg, MISC_SMB_EN_CMD, EN_CP_CMD, EN_CP_CMD);
+	if (rc < 0)
+		goto rollback;
+
+	rc = regulator_enable(chg->cp);
+	if (rc < 0)
+		goto rollback;
+
+	chg->cp_active = true;
+	chg->cp_ilim_ua = ilim_ua;
+	chg->cp_arm_jiff = jiffies;
+	dev_info(chg->dev, "charge pump active (ILIM %u uA)\n", ilim_ua);
+	return 0;
+
+rollback:
+	chg_masked_write(chg, MISC_SMB_EN_CMD,
+			 EN_CP_CMD | SMB_EN_OVERRIDE | SMB_EN_OVERRIDE_VALUE,
+			 SMB_EN_OVERRIDE);
+	return rc;
+}
+
+static void chg_cp_disable(struct pm8150b_chg *chg)
+{
+	int rc;
+
+	if (!chg->cp_active)
+		return;
+
+	rc = regulator_disable(chg->cp);
+	if (rc < 0)
+		dev_warn(chg->dev, "failed to stop the charge pump\n");
+
+	chg_masked_write(chg, MISC_SMB_EN_CMD, EN_CP_CMD, 0);
+	chg_masked_write(chg, MISC_SMB_EN_CMD,
+			 SMB_EN_OVERRIDE | SMB_EN_OVERRIDE_VALUE,
+			 SMB_EN_OVERRIDE);
+	chg_masked_write(chg, MISC_SMB_CFG, SMB_EN_SEL, 0);
+
+	chg->cp_active = false;
+	chg->cp_ilim_ua = 0;
+	dev_info(chg->dev, "charge pump inactive\n");
+}
+
 /*
  * Combine the profile's JEITA and step-charging tables into the charge
  * limits in effect: the tables only ever lower the profile maxima, and
@@ -1064,9 +1329,20 @@ static int chg_table_lookup(struct chg_table *tbl, int reading, int hyst,
  */
 static bool chg_update_limits(struct pm8150b_chg *chg)
 {
-	unsigned int fcc_ua = chg->fcc_ua, fv_uv = chg->fv_uv;
+	unsigned int fcc_ua, fv_uv = chg->fv_uv;
 	bool changed = false;
 	int vbat_uv, val;
+
+	/*
+	 * While the pump carries the charge, the cell's charge pump
+	 * ceiling replaces the buck ceiling; see the battery profile's
+	 * qcom,charge-pump-fcc-ua.  The ceiling only applies while the
+	 * pump is really converting: a buck charger left on its own at the
+	 * 9 V class is what the source's power budget is measured for.  The
+	 * tables derate either the same way.
+	 */
+	fcc_ua = chg_cp_converting(chg) && chg->cp_fcc_ua ? chg->cp_fcc_ua
+							  : chg->fcc_ua;
 
 	if (!chg_table_lookup(&chg->jeita_fcc, chg->temp_deci,
 			      JEITA_HYST_DECI_C, &val))
@@ -1099,6 +1375,58 @@ static bool chg_update_limits(struct pm8150b_chg *chg)
 	if (fv_uv != chg->eff_fv_uv && !chg_set_float_voltage(chg, fv_uv)) {
 		chg->eff_fv_uv = fv_uv;
 		changed = true;
+	}
+
+	/* The pump's input limit follows the charge current above. */
+	if (chg->cp_active)
+		chg_cp_update_ilim(chg);
+
+	return changed;
+}
+
+/*
+ * Arming the pump is not the same as carrying the charge: the hardware
+ * pin that starts it only rises while charging is active.  A pump that is
+ * armed but not running while the charger is pushing current has been
+ * stopped by its protections or never came up; drop it and let the pump
+ * policy in the poll arm it again, and one still latched off refuses that
+ * too, leaving the buck charger carrying the charge at its own limits.
+ */
+static bool chg_cp_check(struct pm8150b_chg *chg)
+{
+	bool converting = chg_cp_converting(chg);
+	bool changed = false;
+	int running;
+
+	/*
+	 * The charge ceiling is released for real conversion only, and the
+	 * switcher crosses in and out of it on the hardware pin, without
+	 * the driver being asked -- the pin drops on its own at charge
+	 * termination, say.  Follow every crossing so that a ceiling meant
+	 * for the pump is never left sitting on the buck.
+	 */
+	if (converting != chg->cp_converting) {
+		chg->cp_converting = converting;
+		if (chg_update_limits(chg))
+			changed = true;
+	}
+
+	if (!chg->cp_active || chg->status != POWER_SUPPLY_STATUS_CHARGING ||
+	    time_before(jiffies, chg->cp_retry_jiff) ||
+	    time_before(jiffies, chg->cp_arm_jiff +
+				  msecs_to_jiffies(CP_SS_GRACE_MS)))
+		return changed;
+
+	running = regulator_is_enabled(chg->cp);
+	if (running == 0) {
+		/*
+		 * Armed and still not carrying the charge: the load did
+		 * not take the switcher up.  Rest before the policy below
+		 * arms it again, or a load too light for the pump turns
+		 * into an arm and trip loop.
+		 */
+		chg_cp_disable(chg);
+		chg->cp_retry_jiff = jiffies + msecs_to_jiffies(CP_RETRY_MS);
 	}
 
 	return changed;
@@ -1461,6 +1789,7 @@ static void chg_status_work(struct work_struct *work)
 		container_of(work, struct pm8150b_chg, status_work.work);
 	bool changed = false;
 	bool allow = true;
+	bool want_cp;
 	unsigned int delay_ms;
 	int status, online, present, capacity, temp;
 
@@ -1483,6 +1812,7 @@ static void chg_status_work(struct work_struct *work)
 			schedule_delayed_work(&chg->detect_work,
 					      msecs_to_jiffies(700));
 		} else {
+			chg_cp_disable(chg);
 			chg_hvdcp_enable(chg, false);
 			cancel_delayed_work_sync(&chg->qc3_work);
 			chg->qc3_pulses = 0;
@@ -1541,6 +1871,54 @@ static void chg_status_work(struct work_struct *work)
 				chg->charge_allowed = allow;
 				changed = true;
 			}
+		}
+	}
+
+	/*
+	 * The charge pump takes the charge path over once the source has
+	 * been walked up to the 9 V class and comes off again below it, on
+	 * a plug out, or while charging is held off: the pump is a 2:1
+	 * divider and only clears the cell at the higher input class.  It
+	 * is armed for charging only: an armed switcher left idle has its
+	 * start pin pulsed at it whenever the charger twitches around
+	 * termination, and a start into no load only trips the switcher's
+	 * window protection.  Its input limit has to be in the pump's
+	 * accurate range to be worth starting for, see chg_cp_ilim_ua().
+	 */
+	if (chg_cp_check(chg))
+		changed = true;
+
+	want_cp = chg->cp && chg->usb_present && chg->src_qc3 &&
+		  chg->status == POWER_SUPPLY_STATUS_CHARGING &&
+		  chg->src_voltage_uv >= CP_INPUT_MIN_UV &&
+		  chg_cp_vbus_ok(chg) && chg->charge_allowed &&
+		  chg_cp_ilim_ua(chg) >= CP_ILIM_MIN_UA;
+
+	/* A pump that refused to start waits out its backoff, see above. */
+	if (want_cp && !chg->cp_active &&
+	    time_before(jiffies, chg->cp_retry_jiff))
+		want_cp = false;
+
+	if (want_cp != chg->cp_active) {
+		bool ok;
+
+		if (want_cp) {
+			ok = !chg_cp_enable(chg);
+			if (!ok) {
+				chg->cp_retry_jiff = jiffies +
+					msecs_to_jiffies(CP_RETRY_MS);
+				dev_warn(chg->dev,
+					 "failed to start the charge pump\n");
+			}
+		} else {
+			chg_cp_disable(chg);
+			ok = true;
+		}
+
+		if (ok) {
+			/* The charge ceiling moves with the pump. */
+			chg_update_limits(chg);
+			changed = true;
 		}
 	}
 
@@ -1666,10 +2044,23 @@ static int chg_read_battery_limits(struct pm8150b_chg *chg)
 		if (!rc)
 			rc = chg_read_table(chg->dev, np, "qcom,step-chg-ranges",
 					    &chg->step_fcc);
+
+		/*
+		 * The cell takes more current while the charge pump
+		 * carries the charge; the figure lives with the cell's
+		 * other tables, and is optional.
+		 */
+		of_property_read_u32(np, "qcom,charge-pump-fcc-ua",
+				     &chg->cp_fcc_ua);
 		of_node_put(np);
 		if (rc)
 			return rc;
 	}
+
+	if (chg->cp_fcc_ua > 8000000)
+		return dev_err_probe(chg->dev, -EINVAL,
+				     "charge pump charge current %u uA out of range\n",
+				     chg->cp_fcc_ua);
 
 	/*
 	 * Float voltage is what stops over-charge, so an implausible value
@@ -1834,6 +2225,31 @@ static int chg_probe(struct platform_device *pdev)
 		chg->dpdm = NULL;
 	}
 
+	/*
+	 * Optional: boards without an SMB1390 charge pump simply charge
+	 * through the buck converter.
+	 */
+	chg->cp = devm_regulator_get_optional(chg->dev, "charge-pump");
+	if (IS_ERR(chg->cp)) {
+		if (PTR_ERR(chg->cp) != -ENODEV)
+			return dev_err_probe(chg->dev, PTR_ERR(chg->cp),
+					     "charge-pump supply\n");
+		chg->cp = NULL;
+	}
+
+	/*
+	 * Optional: the measured input voltage is what keeps the charge
+	 * pump honest about the class the adapter is really at, see
+	 * chg_get_vbus_uv().
+	 */
+	chg->vbus = devm_iio_channel_get(chg->dev, "vbus");
+	if (IS_ERR(chg->vbus)) {
+		if (PTR_ERR(chg->vbus) != -ENODEV)
+			return dev_err_probe(chg->dev, PTR_ERR(chg->vbus),
+					     "vbus ADC\n");
+		chg->vbus = NULL;
+	}
+
 	INIT_DEFERRABLE_WORK(&chg->status_work, chg_status_work);
 	INIT_DEFERRABLE_WORK(&chg->detect_work, chg_detect_work);
 	INIT_DEFERRABLE_WORK(&chg->qc3_work, chg_qc3_work);
@@ -1894,10 +2310,11 @@ static void chg_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&chg->status_work);
 
 	/*
-	 * Give D+/D- back to the gadget before the devm-managed supply is
-	 * released: the regulator core complains about being put while
-	 * still enabled.
+	 * Give the charge pump and D+/D- back before the devm-managed
+	 * supplies are released: the regulator core complains about being
+	 * put while still enabled.
 	 */
+	chg_cp_disable(chg);
 	chg_dpdm_float(chg, false);
 }
 
@@ -1920,3 +2337,4 @@ module_platform_driver(chg_driver);
 MODULE_DESCRIPTION("PM8150B SMB5 battery charger and gauge driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("GengWei1997 <gw19970326@gmail.com>");
+MODULE_IMPORT_NS("IIO_CONSUMER");
