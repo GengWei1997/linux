@@ -9,7 +9,7 @@ title: Qualcomm PM8150B SMB5 battery charger and GEN4 fuel gauge
 maintainers:
   - GengWei1997 <gw19970326@gmail.com>
 
-description:
+description: |
   The PM8150B PMIC combines an SMB5 switch-mode battery charger with a GEN4
   fuel gauge.  Both are reached through the PMIC register map, the charger at
   0x1000-0x16ff and the gauge at 0x4000-0x43ff, so a single device covers
@@ -29,6 +29,12 @@ description:
     - qcom,step-chg-ranges: battery voltage bounds in microvolts, value is
       the charge current in microamps.
 
+  Boards that fit an SMB1390 charge pump may describe it with
+  charge-pump-supply.  While the pump carries the charge, the battery
+  node's optional qcom,charge-pump-fcc-ua (microamps) replaces
+  constant-charge-current-max-microamp as the charge current ceiling; the
+  tables derate it the same way.
+
 properties:
   compatible:
     const: qcom,pm8150b-charger
@@ -47,6 +53,20 @@ properties:
       - const: chg-state-change
 
   monitored-battery: true
+
+  charge-pump-supply:
+    description:
+      Phandle to the SMB1390 charge pump's regulator, see
+      "qcom,smb1390".  Without it the charger runs the buck converter
+      alone.
+
+  io-channels:
+    maxItems: 1
+    description: The ADC channel measuring the input voltage.
+
+  io-channel-names:
+    items:
+      - const: vbus
 
 required:
   - compatible

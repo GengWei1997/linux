@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/qcom,smb1390.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm SMB1390 switched-capacitor charge pump
+
+maintainers:
+  - GengWei1997 <gw19970326@gmail.com>
+
+description: |
+  The SMB1390 is a 2:1 switched-capacitor charge pump sitting between the
+  adapter and the charger's system rail: fed 9 V it feeds the rail at about
+  4.5 V, halving the current the buck charger has to convert.  It is
+  reached over I2C and exposes its switcher as a current-limited regulator
+  for the charger driver to arm; the regulator's current limit is the
+  pump's input current limit.  One interrupt wire reports the pump's
+  protection trips to the PMIC charger.
+
+properties:
+  compatible:
+    const: qcom,smb1390
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+    description: The pump's fault output, wired to a PMIC GPIO.
+
+  regulator-min-microamp:
+    description: Lowest input current limit the pump can be set to.
+
+  regulator-max-microamp:
+    description: Highest input current limit the pump can be set to.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - regulator-min-microamp
+  - regulator-max-microamp
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      charge-pump@10 {
+        compatible = "qcom,smb1390";
+        reg = <0x10>;
+
+        interrupt-parent = <&pm8150b_gpios>;
+        interrupts = <6 IRQ_TYPE_LEVEL_LOW>;
+
+        regulator-min-microamp = <500000>;
+        regulator-max-microamp = <3600000>;
+      };
+    };
+...
