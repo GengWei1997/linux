@@ -836,4 +836,13 @@
 	status = "okay";
 
 	monitored-battery = <&battery>;
+
+	/*
+	 * BC1.2 and the QC handshake watch and drive the very D+/D- pair the
+	 * USB gadget uses, so the charger takes the pair (leaving it floating)
+	 * for as long as it needs it.  The HS PHY's "dpdm" regulator is what
+	 * hands it over; a source that turns out to be a host gets the pair
+	 * back for the gadget.
+	 */
+	dpdm-supply = <&usb_1_hsphy>;
 };

@@ -9,11 +9,14 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/machine.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
 
@@ -121,6 +124,9 @@ struct phy_override_seq {
  * @phy_initialized: if PHY has been initialized correctly
  * @mode: contains the current mode the PHY is in
  * @update_seq_cfg: tuning parameters for phy init
+ * @dpdm_lock: serializes the D+/D- handover with init and exit
+ * @dpdm_float: the PMIC charger owns D+/D- and the PHY keeps off them
+ * @dpdm_rdev: the regulator handing D+/D- to the PMIC charger
  */
 struct qcom_snps_hsphy {
 	struct device *dev;
@@ -136,6 +142,10 @@ struct qcom_snps_hsphy {
 	bool phy_initialized;
 	enum phy_mode mode;
 	struct phy_override_seq update_seq_cfg[NUM_HSPHY_TUNING_PARAMS];
+
+	struct mutex dpdm_lock;	/* around the D+/D- handover registers */
+	bool dpdm_float;
+	struct regulator_dev *dpdm_rdev;
 };
 
 static int qcom_snps_hsphy_clk_init(struct qcom_snps_hsphy *hsphy)
@@ -178,6 +188,41 @@ static inline void qcom_snps_hsphy_write_mask(void __iomem *base, u32 offset,
 
 	/* Ensure above write is completed */
 	readl_relaxed(base + offset);
+}
+
+/*
+ * The PMIC charger classifies the source and negotiates QC voltages on the
+ * very D+/D- pair this PHY drives, so while the charger owns the pair the
+ * PHY has to keep off it.  Overriding the UTMI datapath and putting the
+ * transceiver in non-driving mode leaves Dp and Dm in high-Z, which is what
+ * the PMIC's detection hardware needs to see.
+ */
+static void qcom_snps_hsphy_dpdm_float(struct qcom_snps_hsphy *hsphy, bool on)
+{
+	if (on) {
+		qcom_snps_hsphy_write_mask(hsphy->base,
+					   USB2_PHY_USB_PHY_HS_PHY_CTRL2,
+					   USB2_SUSPEND_N_SEL | USB2_SUSPEND_N,
+					   USB2_SUSPEND_N_SEL | USB2_SUSPEND_N);
+		qcom_snps_hsphy_write_mask(hsphy->base,
+					   USB2_PHY_USB_PHY_UTMI_CTRL0,
+					   OPMODE_MASK, OPMODE_NONDRIVING);
+		qcom_snps_hsphy_write_mask(hsphy->base,
+					   USB2_PHY_USB_PHY_CFG0,
+					   UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN,
+					   UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN);
+	} else {
+		qcom_snps_hsphy_write_mask(hsphy->base,
+					   USB2_PHY_USB_PHY_CFG0,
+					   UTMI_PHY_DATAPATH_CTRL_OVERRIDE_EN,
+					   0);
+		qcom_snps_hsphy_write_mask(hsphy->base,
+					   USB2_PHY_USB_PHY_UTMI_CTRL0,
+					   OPMODE_MASK, OPMODE_NORMAL);
+		qcom_snps_hsphy_write_mask(hsphy->base,
+					   USB2_PHY_USB_PHY_HS_PHY_CTRL2,
+					   USB2_SUSPEND_N_SEL, 0);
+	}
 }
 
 static int qcom_snps_hsphy_suspend(struct qcom_snps_hsphy *hsphy)
@@ -464,7 +509,16 @@ static int qcom_snps_hsphy_init(struct phy *phy)
 	qcom_snps_hsphy_write_mask(hsphy->base, USB2_PHY_USB_PHY_CFG0,
 					UTMI_PHY_CMN_CTRL_OVERRIDE_EN, 0);
 
+	/*
+	 * A charger holding D+/D- gets them back over the fresh init: the
+	 * sequence above hands the pair to the UTMI controller again.
+	 */
+	mutex_lock(&hsphy->dpdm_lock);
+	if (hsphy->dpdm_float)
+		qcom_snps_hsphy_dpdm_float(hsphy, true);
+
 	hsphy->phy_initialized = true;
+	mutex_unlock(&hsphy->dpdm_lock);
 
 	return 0;
 
@@ -480,10 +534,13 @@ static int qcom_snps_hsphy_exit(struct phy *phy)
 {
 	struct qcom_snps_hsphy *hsphy = phy_get_drvdata(phy);
 
+	mutex_lock(&hsphy->dpdm_lock);
+	hsphy->phy_initialized = false;
+	mutex_unlock(&hsphy->dpdm_lock);
+
 	reset_control_assert(hsphy->phy_reset);
 	clk_bulk_disable_unprepare(hsphy->num_clks, hsphy->clks);
 	regulator_bulk_disable(ARRAY_SIZE(hsphy->vregs), hsphy->vregs);
-	hsphy->phy_initialized = false;
 
 	return 0;
 }
@@ -494,6 +551,81 @@ static const struct phy_ops qcom_snps_hsphy_gen_ops = {
 	.set_mode	= qcom_snps_hsphy_set_mode,
 	.owner		= THIS_MODULE,
 };
+
+static int qcom_snps_hsphy_dpdm_enable(struct regulator_dev *rdev)
+{
+	struct qcom_snps_hsphy *hsphy = rdev_get_drvdata(rdev);
+
+	mutex_lock(&hsphy->dpdm_lock);
+	if (hsphy->phy_initialized)
+		qcom_snps_hsphy_dpdm_float(hsphy, true);
+	hsphy->dpdm_float = true;
+	mutex_unlock(&hsphy->dpdm_lock);
+
+	return 0;
+}
+
+static int qcom_snps_hsphy_dpdm_disable(struct regulator_dev *rdev)
+{
+	struct qcom_snps_hsphy *hsphy = rdev_get_drvdata(rdev);
+
+	mutex_lock(&hsphy->dpdm_lock);
+	if (hsphy->phy_initialized)
+		qcom_snps_hsphy_dpdm_float(hsphy, false);
+	hsphy->dpdm_float = false;
+	mutex_unlock(&hsphy->dpdm_lock);
+
+	return 0;
+}
+
+static int qcom_snps_hsphy_dpdm_is_enabled(struct regulator_dev *rdev)
+{
+	struct qcom_snps_hsphy *hsphy = rdev_get_drvdata(rdev);
+
+	return hsphy->dpdm_float;
+}
+
+static const struct regulator_ops qcom_snps_hsphy_dpdm_ops = {
+	.enable		= qcom_snps_hsphy_dpdm_enable,
+	.disable	= qcom_snps_hsphy_dpdm_disable,
+	.is_enabled	= qcom_snps_hsphy_dpdm_is_enabled,
+};
+
+static const struct regulator_desc qcom_snps_hsphy_dpdm_desc = {
+	.name		= "dpdm",
+	.type		= REGULATOR_VOLTAGE,
+	.ops		= &qcom_snps_hsphy_dpdm_ops,
+	.owner		= THIS_MODULE,
+};
+
+/*
+ * Handing D+/D- to the PMIC charger is modelled as the "dpdm" regulator the
+ * Qualcomm charger bindings describe as "dpdm-supply": it floats the pair for
+ * the charger's source detection and QC signalling, and gives it back to the
+ * USB controller when a host turns up on the other end of the cable.
+ */
+static int qcom_snps_hsphy_dpdm_register(struct qcom_snps_hsphy *hsphy)
+{
+	struct device *dev = hsphy->dev;
+	struct regulator_init_data *init_data;
+	struct regulator_config cfg = {};
+
+	init_data = devm_kzalloc(dev, sizeof(*init_data), GFP_KERNEL);
+	if (!init_data)
+		return -ENOMEM;
+
+	init_data->constraints.valid_ops_mask |= REGULATOR_CHANGE_STATUS;
+
+	cfg.dev = dev;
+	cfg.init_data = init_data;
+	cfg.driver_data = hsphy;
+	cfg.of_node = dev->of_node;
+
+	hsphy->dpdm_rdev = devm_regulator_register(dev,
+						   &qcom_snps_hsphy_dpdm_desc,
+						   &cfg);
+	return PTR_ERR_OR_ZERO(hsphy->dpdm_rdev);
+}
 
 static const struct of_device_id qcom_snps_hsphy_of_match_table[] = {
 	{ .compatible	= "qcom,sm8150-usb-hs-phy", },
@@ -575,6 +707,7 @@ static int qcom_snps_hsphy_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	hsphy->dev = dev;
+	mutex_init(&hsphy->dpdm_lock);
 
 	hsphy->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(hsphy->base))
@@ -629,6 +762,12 @@ static int qcom_snps_hsphy_probe(struct platform_device *pdev)
 	dev_set_drvdata(dev, hsphy);
 	phy_set_drvdata(generic_phy, hsphy);
 	qcom_snps_hsphy_read_override_param_seq(dev);
+
+	ret = qcom_snps_hsphy_dpdm_register(hsphy);
+	if (ret) {
+		pm_runtime_put_noidle(dev);
+		return dev_err_probe(dev, ret, "failed to register dpdm\n");
+	}
 
 	phy_provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
 	if (IS_ERR(phy_provider)) {

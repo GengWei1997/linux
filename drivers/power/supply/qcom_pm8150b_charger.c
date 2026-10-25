@@ -18,6 +18,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -25,6 +26,7 @@
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
@@ -51,6 +53,7 @@
 #define CHGR_FLOAT_VOLTAGE_CFG		0x1070
 
 /* DCDC peripheral (0x1100) */
+#define DCDC_FSW_SEL			0x1150
 #define ICL_MAX_STATUS			0x1106
 #define POWER_PATH_STATUS		0x110b
 #define USBIN_SUSPEND_STS		BIT(6)
@@ -65,6 +68,8 @@
 #define USBIN_PLUGIN_RT_STS		BIT(4)
 
 #define APSD_STATUS			0x1307
+#define HVDCP_CHECK_TIMEOUT		BIT(6)
+#define QC_AUTH_DONE			BIT(2)
 #define QC_CHARGER			BIT(1)
 #define APSD_DTC_DONE			BIT(0)
 
@@ -85,14 +90,28 @@
 #define USBIN_CMD_IL			0x1340
 #define USBIN_SUSPEND			BIT(0)
 
+#define CMD_APSD			0x1341
+#define APSD_RERUN			BIT(0)
+
 #define CMD_ICL_OVERRIDE		0x1342
 #define ICL_OVERRIDE			BIT(0)
 
+#define CMD_HVDCP_2			0x1343
+#define HVDCP_FORCE_9V			BIT(4)
+#define HVDCP_SINGLE_INC		BIT(0)
+
 #define USBIN_OPTIONS_1_CFG		0x1362
+#define HVDCP_AUTH_ALG_EN		BIT(6)
 #define BC1P2_SRC_DETECT		BIT(3)
+#define HVDCP_EN			BIT(2)
 
 #define USBIN_LOAD_CFG			0x1365
 #define ICL_OVERRIDE_AFTER_APSD		BIT(4)
+#define USBIN_AICL_STEP_TIMING_SEL	GENMASK(3, 2)
+#define USBIN_IN_COLLAPSE_GF_SEL	GENMASK(1, 0)
+
+#define TYPE_C_CFG			0x1358
+#define BC1P2_START_ON_CC		BIT(7)
 
 #define USBIN_ICL_OPTIONS		0x1366
 #define USBIN_MODE_CHG			BIT(0)
@@ -171,7 +190,8 @@
 #define ICL_SDP_UA			500000
 #define ICL_CDP_UA			1500000
 #define ICL_DCP_UA			1600000
-#define ICL_QC_UA			2000000
+#define ICL_QC2_UA			1500000
+#define ICL_QC3_UA			2800000
 #define ICL_FLOAT_UA			1000000
 #define ICL_UNKNOWN_UA			100000
 
@@ -182,6 +202,35 @@
 #define ICL_TYPEC_DEFAULT_UA		500000
 #define ICL_TYPEC_1P5A_UA		1500000
 #define ICL_TYPEC_3A_UA			3000000
+
+/*
+ * A QC3 adapter has no classes to request: it steps 200 mV per D+ pulse
+ * and the pulse count is the voltage.  Twenty pulses take the 5 V default
+ * to the 9 V class, which is where this stops: the 4.4 V cell needs no
+ * more at this power level and it keeps the charger switcher inside its
+ * comfortable range.
+ */
+#define HVDCP3_STEP_UV			200000
+#define QC3_PULSES_FOR_6V		5
+#define QC3_PULSES_FOR_9V		20
+
+/*
+ * The input current is backed off while the adapter walks up the ladder.
+ * A load step on top of the rising input is what sends a marginal adapter
+ * back to 5 V mid-burst; the limit goes back to what the source is good
+ * for once the burst is over, see chg_update_input().
+ */
+#define ICL_QC3_BOOST_UA		1000000
+
+/*
+ * The charger switcher wants a frequency picked for the input voltage it
+ * is stepping down: the vendor walks it up in the "5 V", "6-8 V" and
+ * "9 V" steps of its frequency table as VBUS climbs.  DCDC_FSW_SEL holds
+ * 19.2 MHz / FSW - 1, so those steps program 1200, 1600 and 2100 kHz.
+ */
+#define FSW_1200_KHZ			15
+#define FSW_1600_KHZ			11
+#define FSW_2100_KHZ			8
 
 /*
  * Gauge scaling.  One battery-voltage LSB is 122070/1000 uV.  The
@@ -210,18 +259,31 @@ struct pm8150b_chg {
 	 */
 	int			status;
 	int			usb_online;
+	int			usb_present;	/* last plug state seen */
 	int			src_type;	/* last source class reported */
 	int			src_voltage_uv;	/* last QC class reported */
+	int			qc3_pulses;	/* QC3 steps sent so far */
+	bool			qc3_boosting;	/* QC3 burst owns the input limit */
+	bool			detecting;	/* source detection drives D+/D- */
 	int			capacity;
 	int			temp_deci;
 	bool			temp_valid;
 	int			temp_bad;	/* out-of-range samples in a row */
 	bool			charge_allowed;
 
+	/*
+	 * D+/D- are shared between the USB gadget and this charger's own
+	 * source detection and QC signalling, see chg_dpdm_float().
+	 */
+	struct regulator	*dpdm;
+	bool			dpdm_held;
+
 	/* Requested IRQs, held for the unload sequence, see chg_remove(). */
 	int			*irqs;
 
 	struct delayed_work	status_work;
+	struct delayed_work	detect_work;
+	struct delayed_work	qc3_work;
 };
 
 /* ------------------------- register helpers --------------------------- */
@@ -240,6 +302,33 @@ static int chg_masked_write(struct pm8150b_chg *chg, unsigned int reg,
 			    unsigned int mask, unsigned int val)
 {
 	return regmap_update_bits(chg->regmap, reg, mask, val);
+}
+
+/* ----------------------- D+/D- ownership ---------------------------- */
+
+/*
+ * D+/D- are shared between the USB gadget and this charger.  The gadget
+ * talks to a host over them, but the charger has to see the same pair to
+ * classify the source and to signal QC voltages, and a gadget sitting on
+ * the lines corrupts both: BC1.2 then reports an "other charging port"
+ * whatever is plugged in and the QC handshake never completes.  The USB HS
+ * PHY's "dpdm" regulator floats the pair while the charger needs it.
+ */
+static void chg_dpdm_float(struct pm8150b_chg *chg, bool on)
+{
+	int rc;
+
+	if (!chg->dpdm || chg->dpdm_held == on)
+		return;
+
+	rc = on ? regulator_enable(chg->dpdm) : regulator_disable(chg->dpdm);
+	if (rc < 0) {
+		dev_warn(chg->dev, "failed to %s D+/D-\n",
+			 on ? "take over" : "give back");
+		return;
+	}
+
+	chg->dpdm_held = on;
 }
 
 /* --------------------------- fuel gauge ------------------------------- */
@@ -484,7 +573,28 @@ struct chg_source {
 	enum power_supply_usb_type	usb_type;
 	int				voltage_uv;
 	unsigned int			icl_ua;
+	bool				qc2;
+	bool				qc3;
 };
+
+/*
+ * The pair is held by default and only a source that identifies as a host
+ * gets it back: a charger has nowhere to enumerate to and needs the pair
+ * for the QC handshake and for the voltage requests that follow.  A verdict
+ * that has not settled yet changes nothing, so re-running the detection
+ * does not yank the pair away in the middle of an enumeration.
+ */
+static void chg_dpdm_policy(struct pm8150b_chg *chg, const struct chg_source *src)
+{
+	bool host;
+
+	if (src->usb_type == POWER_SUPPLY_USB_TYPE_UNKNOWN)
+		return;
+
+	host = src->usb_type == POWER_SUPPLY_USB_TYPE_SDP ||
+	       src->usb_type == POWER_SUPPLY_USB_TYPE_CDP;
+	chg_dpdm_float(chg, !host);
+}
 
 /*
  * Source classification.  BC1.2 detection runs in the hardware and leaves
@@ -553,6 +663,17 @@ static int chg_read_source(struct pm8150b_chg *chg, struct chg_source *src)
 		src->icl_ua = ICL_SDP_UA;
 	}
 
+	/*
+	 * The QC handshake lands in stages and its intermediate states
+	 * look like real verdicts: a QC3 adapter answers QC_2P0 before its
+	 * authentication completes.  Firing voltage commands at a handshake
+	 * still in formation takes the adapter down, so nothing is believed
+	 * before the authenticated state; the vendor driver acts on the
+	 * very same bit.
+	 */
+	if (!(apsd & QC_AUTH_DONE))
+		return 0;
+
 	/* A QC adapter says so both in APSD_STATUS and in the verdict. */
 	if (!(apsd & QC_CHARGER) && !(result & (QC_2P0 | QC_3P0)))
 		return 0;
@@ -563,9 +684,25 @@ static int chg_read_source(struct pm8150b_chg *chg, struct chg_source *src)
 
 	src->type = POWER_SUPPLY_TYPE_USB_DCP;
 	src->usb_type = POWER_SUPPLY_USB_TYPE_DCP;
-	src->icl_ua = ICL_QC_UA;
+	src->qc2 = !!(result & QC_2P0);
+	src->qc3 = !!(result & QC_3P0);
 
-	if (qc & QC_12V)
+	/*
+	 * The two QC generations are trusted with different currents: a
+	 * QC2 source is an 18 W class adapter, while a QC3 one reaches the
+	 * 9 V/3 A class these phones ship with.
+	 */
+	src->icl_ua = src->qc3 ? ICL_QC3_UA : ICL_QC2_UA;
+
+	/*
+	 * A QC2 adapter reports its class in QC_CHANGE_STATUS.  A QC3 one
+	 * has no classes at all: it steps 200 mV per D+ pulse and the
+	 * hardware only keeps the pulse count, so what was sent is what
+	 * tells the voltage.
+	 */
+	if (src->qc3)
+		src->voltage_uv = 5000000 + HVDCP3_STEP_UV * chg->qc3_pulses;
+	else if (qc & QC_12V)
 		src->voltage_uv = 12000000;
 	else if (qc & QC_9V)
 		src->voltage_uv = 9000000;
@@ -695,9 +832,10 @@ static int chg_set_icl(struct pm8150b_chg *chg, unsigned int icl_ua)
 }
 
 /*
- * Take the current the plugged-in source is good for.  Detection settles
- * some time after the plug event, so this runs again on every poll.  True is
- * returned when the verdict differs from the one already reported.
+ * Take the current the plugged-in source is good for, and ask a QC2 adapter
+ * for the higher voltage class.  Detection settles some time after the plug
+ * event, so this runs again on every poll.  True is returned when the
+ * verdict differs from the one already reported.
  */
 static bool chg_update_input(struct pm8150b_chg *chg)
 {
@@ -709,16 +847,56 @@ static bool chg_update_input(struct pm8150b_chg *chg)
 	if (rc < 0)
 		return false;
 
+	/*
+	 * A handshake that starts over starts over at 5 V: the adapter
+	 * dropped out of QC and the pulse count no longer describes the
+	 * output.  Drop it so the next burst climbs from the truth and the
+	 * voltage reported alongside is never a stale figure.
+	 */
+	if (!src.qc3 && !chg->qc3_boosting)
+		chg->qc3_pulses = 0;
+
 	changed = src.type != chg->src_type ||
 		  src.voltage_uv != chg->src_voltage_uv;
 
-	/* A limit set from userspace stays until it is cleared again. */
-	if (!chg->icl_manual && src.icl_ua != chg->icl_ua) {
+	/* The verdict is what decides who may drive D+/D-. */
+	chg_dpdm_policy(chg, &src);
+
+	/*
+	 * A limit set from userspace stays until it is cleared again, and
+	 * the QC3 burst owns the input limit while it runs.
+	 */
+	if (!chg->icl_manual && !chg->qc3_boosting &&
+	    src.icl_ua != chg->icl_ua) {
 		rc = chg_set_icl(chg, src.icl_ua);
 		if (rc < 0)
 			dev_warn(chg->dev, "failed to limit input to %u uA\n",
 				 src.icl_ua);
 	}
+
+	/*
+	 * A QC2 adapter waits at 5 V to be asked for more, so ask.  The
+	 * command is a one-shot on the wire, so keep asking while the answer
+	 * is still 5 V; the pulse counter caps the answer at the 9 V class,
+	 * which is all the 4.4 V cell needs and keeps the switcher well
+	 * inside its range.
+	 */
+	if (src.qc2 && src.voltage_uv == 5000000) {
+		rc = chg_write(chg, CMD_HVDCP_2, HVDCP_FORCE_9V);
+		if (rc < 0)
+			dev_warn(chg->dev,
+				 "failed to ask the adapter for 9 V\n");
+	}
+
+	/*
+	 * A QC3 adapter answers no static request; it walks 200 mV per D+
+	 * pulse instead, see chg_qc3_work().  The pulse count doubles as
+	 * the guard against doing that twice, and detection owns D+/D-
+	 * while it runs.
+	 */
+	if (src.qc3 && !chg->qc3_boosting && !chg->detecting &&
+	    chg->qc3_pulses < QC3_PULSES_FOR_9V)
+		schedule_delayed_work(&chg->qc3_work, 0);
 
 	chg->src_type = src.type;
 	chg->src_voltage_uv = src.voltage_uv;
@@ -969,6 +1147,147 @@ static const struct power_supply_desc chg_usb_desc = {
 
 /* --------------------------- state polling ---------------------------- */
 
+/*
+ * The Qualcomm handshake is a second pass over an already classified source,
+ * and it is kept out of the first one: BC1.2 has to see the plain D+/D-
+ * picture before the handshake starts moving the pair around.  It is turned
+ * on shortly after a source appears -- the vendor driver waits 700 ms for
+ * the input to settle -- and off again when the source goes away, so every
+ * plug starts from the plain classification.
+ */
+static void chg_hvdcp_enable(struct pm8150b_chg *chg, bool enable)
+{
+	unsigned int mask = HVDCP_AUTH_ALG_EN | HVDCP_EN;
+	int rc;
+
+	rc = chg_masked_write(chg, USBIN_OPTIONS_1_CFG, mask,
+			      enable ? mask : 0);
+	if (rc < 0)
+		dev_warn(chg->dev, "failed to %s the QC handshake\n",
+			 enable ? "enable" : "disable");
+}
+
+/*
+ * Run source detection again with the handshake turned on.  Anything that
+ * was classified before this runs -- a charger already plugged in while the
+ * driver loaded, say -- never gets as far as the handshake without it.
+ *
+ * Detection drives D+/D-, so the verdict is waited out before anything
+ * else may touch the pair: a QC3 burst racing a detection gets the
+ * handshake torn down under it.  The verdict also lands in stages, BC1.2
+ * first and the QC handshake seconds later, and only the final state may
+ * be believed; see chg_read_source().
+ */
+static void chg_detect_work(struct work_struct *work)
+{
+	struct pm8150b_chg *chg =
+		container_of(work, struct pm8150b_chg, detect_work.work);
+	unsigned int stat, result;
+	bool settling = false;
+	int i, present, rc;
+
+	if (!chg_usb_present(chg, &present) && present) {
+		chg_hvdcp_enable(chg, true);
+
+		rc = chg_write(chg, CMD_APSD, APSD_RERUN);
+		if (rc < 0)
+			dev_warn(chg->dev,
+				 "failed to re-run source detection\n");
+
+		/*
+		 * Only a state reached after the detection has visibly been
+		 * in flight counts as final: the registers still hold the
+		 * previous verdict until the re-run takes effect.  A source
+		 * that speaks no QC settles as soon as BC1.2 is done and the
+		 * QC check has timed out; a QC one only once authenticated.
+		 */
+		for (i = 0; i < 50; i++) {
+			if (chg_read(chg, APSD_STATUS, &stat) ||
+			    chg_read(chg, APSD_RESULT_STATUS, &result))
+				break;
+
+			if (!(stat & APSD_DTC_DONE)) {
+				settling = true;
+			} else if (settling &&
+				   (!(result & (DCP_CHARGER | OCP_CHARGER)) ||
+				    (stat & HVDCP_CHECK_TIMEOUT)) &&
+				   (!(stat & QC_CHARGER) ||
+				    (stat & QC_AUTH_DONE))) {
+				break;
+			}
+
+			msleep(200);
+		}
+	}
+
+	chg->detecting = delayed_work_pending(&chg->detect_work);
+	mod_delayed_work(system_percpu_wq, &chg->status_work, 0);
+}
+
+/*
+ * The switcher frequency follows the pulses up the ladder, the same way
+ * the vendor driver walks it: the frequency is set for the step about to
+ * be sent, so the switcher is already in the right gear when the new
+ * input voltage arrives.
+ */
+static void chg_qc3_set_fsw(struct pm8150b_chg *chg, int pulses)
+{
+	unsigned int raw;
+
+	if (pulses < QC3_PULSES_FOR_6V)
+		raw = FSW_1200_KHZ;
+	else if (pulses < QC3_PULSES_FOR_9V)
+		raw = FSW_1600_KHZ;
+	else
+		raw = FSW_2100_KHZ;
+
+	chg_write(chg, DCDC_FSW_SEL, raw);
+}
+
+/*
+ * Walk a QC3 adapter up to the 9 V class, one 200 mV D+ pulse at a time
+ * and with the interval the pulses are allowed to come at.  The input
+ * current is held back while the adapter walks, see ICL_QC3_BOOST_UA.  A
+ * source that disappears mid-burst gets the rest of the pulses cancelled
+ * with it, and the unplug resets the count, so a new source always starts
+ * from 5 V.
+ */
+static void chg_qc3_work(struct work_struct *work)
+{
+	struct pm8150b_chg *chg =
+		container_of(work, struct pm8150b_chg, qc3_work.work);
+	int present, rc;
+
+	chg->qc3_boosting = true;
+	rc = chg_set_icl(chg, ICL_QC3_BOOST_UA);
+	if (rc < 0)
+		dev_warn(chg->dev,
+			 "failed to back the input off for the boost\n");
+
+	while (chg->qc3_pulses < QC3_PULSES_FOR_9V) {
+		if (chg_usb_present(chg, &present) || !present)
+			break;
+
+		chg_qc3_set_fsw(chg, chg->qc3_pulses + 1);
+
+		rc = chg_masked_write(chg, CMD_HVDCP_2, HVDCP_SINGLE_INC,
+				      HVDCP_SINGLE_INC);
+		if (rc < 0) {
+			dev_warn(chg->dev,
+				 "failed to pulse the adapter (%d)\n", rc);
+			break;
+		}
+
+		chg->qc3_pulses++;
+		msleep(40);
+	}
+
+	chg->qc3_boosting = false;
+
+	/* The new class wants reporting and a fresh input limit. */
+	mod_delayed_work(system_percpu_wq, &chg->status_work, 0);
+}
+
 static void chg_status_work(struct work_struct *work)
 {
 	struct pm8150b_chg *chg =
@@ -976,10 +1295,32 @@ static void chg_status_work(struct work_struct *work)
 	bool changed = false;
 	bool allow = true;
 	unsigned int delay_ms;
-	int status, online, capacity, temp;
+	int status, online, present, capacity, temp;
 
 	if (!chg_usb_online(chg, &online) && online != chg->usb_online) {
 		chg->usb_online = online;
+		changed = true;
+	}
+
+	/*
+	 * When a source appears, take D+/D- over from the gadget and run the
+	 * QC handshake over the classification once the input has settled;
+	 * see chg_detect_work().  Nothing needs poking on the way out beyond
+	 * dropping the handshake again, and the pair can rest where it is
+	 * until the next source shows up.
+	 */
+	if (!chg_usb_present(chg, &present) && present != chg->usb_present) {
+		chg_dpdm_float(chg, true);
+		if (present) {
+			chg->detecting = true;
+			schedule_delayed_work(&chg->detect_work,
+					      msecs_to_jiffies(700));
+		} else {
+			chg_hvdcp_enable(chg, false);
+			cancel_delayed_work_sync(&chg->qc3_work);
+			chg->qc3_pulses = 0;
+		}
+		chg->usb_present = present;
 		changed = true;
 	}
 
@@ -1068,6 +1409,7 @@ struct chg_irq {
 
 static const struct chg_irq chg_irqs[] = {
 	{ "usbin-plugin",		chg_plugin_irq },
+	{ "usbin-src-change",		chg_plugin_irq },
 	{ "chg-state-change",		chg_state_irq },
 };
 
@@ -1141,9 +1483,9 @@ static int chg_request_irqs(struct pm8150b_chg *chg)
 /*
  * Turn on hardware source detection.  BC1.2 then classifies whatever was
  * plugged in and leaves the verdict in the APSD registers for
- * chg_read_source() to pick up; nothing needs to poke the hardware after
- * this, which is what makes charging work before the driver has even
- * probed.
+ * chg_read_source() to pick up, which is what makes charging work before the
+ * driver has even probed.  The QC handshake is not part of this pass; it is
+ * layered on top of a settled classification later, see chg_detect_work().
  *
  * Detection drives the D+/D- pair while the input-current ramp is running,
  * and the SMB5 reads that transient as a collapsing input.  The protection
@@ -1154,6 +1496,7 @@ static int chg_request_irqs(struct pm8150b_chg *chg)
  */
 static int chg_source_detect_init(struct pm8150b_chg *chg)
 {
+	unsigned int hvdcp = HVDCP_AUTH_ALG_EN | HVDCP_EN;
 	int rc;
 
 	rc = chg_masked_write(chg, USBIN_AICL_OPTIONS_CFG,
@@ -1161,8 +1504,24 @@ static int chg_source_detect_init(struct pm8150b_chg *chg)
 	if (rc < 0)
 		return rc;
 
-	return chg_masked_write(chg, USBIN_OPTIONS_1_CFG, BC1P2_SRC_DETECT,
-				BC1P2_SRC_DETECT);
+	/*
+	 * Start the detection with the input rather than with the CC attach.
+	 * On a legacy cable the two events do not coincide, and detection
+	 * launched from CC runs before the input has settled.
+	 */
+	rc = chg_masked_write(chg, TYPE_C_CFG, BC1P2_START_ON_CC, 0);
+	if (rc < 0)
+		return rc;
+
+	/* Input-collapse filtering and AICL step timing, as the vendor sets. */
+	rc = chg_masked_write(chg, USBIN_LOAD_CFG,
+			      USBIN_IN_COLLAPSE_GF_SEL |
+			      USBIN_AICL_STEP_TIMING_SEL, 0);
+	if (rc < 0)
+		return rc;
+
+	return chg_masked_write(chg, USBIN_OPTIONS_1_CFG,
+				hvdcp | BC1P2_SRC_DETECT, BC1P2_SRC_DETECT);
 }
 
 static int chg_hw_init(struct pm8150b_chg *chg)
@@ -1186,6 +1545,15 @@ static int chg_hw_init(struct pm8150b_chg *chg)
 	rc = chg_configure(chg);
 	if (rc < 0)
 		return rc;
+
+	/*
+	 * Re-run detection with the QC handshake on: a source plugged in
+	 * before the driver loaded is otherwise never handshaked.  It is
+	 * queued ahead of the input update so a stale verdict cannot start
+	 * the QC3 boost before the fresh detection has had the pair.
+	 */
+	chg->detecting = true;
+	schedule_delayed_work(&chg->detect_work, msecs_to_jiffies(700));
 
 	/* Take whatever the attached source is good for. */
 	chg_update_input(chg);
@@ -1212,7 +1580,21 @@ static int chg_probe(struct platform_device *pdev)
 	if (!chg->regmap)
 		return dev_err_probe(chg->dev, -ENODEV, "no regmap\n");
 
+	/*
+	 * Optional: without the supply there is nobody to hand D+/D- to,
+	 * and the gadget keeps the pair whatever the charger thinks.
+	 */
+	chg->dpdm = devm_regulator_get_optional(chg->dev, "dpdm");
+	if (IS_ERR(chg->dpdm)) {
+		if (PTR_ERR(chg->dpdm) != -ENODEV)
+			return dev_err_probe(chg->dev, PTR_ERR(chg->dpdm),
+					     "dpdm supply\n");
+		chg->dpdm = NULL;
+	}
+
 	INIT_DEFERRABLE_WORK(&chg->status_work, chg_status_work);
+	INIT_DEFERRABLE_WORK(&chg->detect_work, chg_detect_work);
+	INIT_DEFERRABLE_WORK(&chg->qc3_work, chg_qc3_work);
 
 	rc = chg_request_irqs(chg);
 	if (rc < 0)
@@ -1254,17 +1636,27 @@ static void chg_remove(struct platform_device *pdev)
 	int i;
 
 	/*
-	 * The IRQs feed the poller below and it re-arms itself, so the
-	 * IRQs go first: disable_irq() waits out a handler that is in
-	 * flight and, with them off, nothing can queue work once the
-	 * cancel has drained what is pending.  Work running past this
-	 * point would chase freed driver state.
+	 * The IRQs feed the pollers below and the pollers re-arm each
+	 * other, so the IRQs go first: disable_irq() waits out a handler
+	 * that is in flight and, with them off, nothing can queue work once
+	 * the cancels have drained what is pending.  Work running past this
+	 * point would chase freed driver state, and might even hand D+/D-
+	 * back after it was given up below.
 	 */
 	for (i = 0; i < ARRAY_SIZE(chg_irqs); i++)
 		if (chg->irqs[i] > 0)
 			disable_irq(chg->irqs[i]);
 
+	cancel_delayed_work_sync(&chg->detect_work);
+	cancel_delayed_work_sync(&chg->qc3_work);
 	cancel_delayed_work_sync(&chg->status_work);
+
+	/*
+	 * Give D+/D- back to the gadget before the devm-managed supply is
+	 * released: the regulator core complains about being put while
+	 * still enabled.
+	 */
+	chg_dpdm_float(chg, false);
 }
 
 static const struct of_device_id chg_match_table[] = {
