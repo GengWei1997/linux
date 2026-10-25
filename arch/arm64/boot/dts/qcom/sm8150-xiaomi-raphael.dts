@@ -55,7 +55,11 @@
 
 	/*
 	 * The K20 Pro ships with two cell variants; both are 4000 mAh with
-	 * the same 4.4 V maximum, so one description covers them both.
+	 * the same 4.4 V maximum and the same charge tables, so one
+	 * description covers them both.  The tables are the cell vendor's
+	 * charge profile: JEITA breakpoints in decidegrees Celsius, step
+	 * charging in microvolts, both asking for microamps.  They only
+	 * ever lower the maxima above.
 	 */
 	battery: battery {
 		compatible = "simple-battery";
@@ -63,8 +67,24 @@
 		voltage-min-design-microvolt = <3400000>;
 		voltage-max-design-microvolt = <4400000>;
 		constant-charge-voltage-max-microvolt = <4400000>;
-		constant-charge-current-max-microamp = <2000000>;
+		constant-charge-current-max-microamp = <3200000>;
 		charge-full-design-microamp-hours = <4000000>;
+
+		qcom,jeita-fcc-ranges = <0    50  390000
+					 51   100 1100000
+					 101  150 2700000
+					 151  450 5100000
+					 451  580 1900000>;
+		qcom,jeita-fv-ranges = <0    50  4400000
+					51   100 4400000
+					101  150 4400000
+					151  450 4400000
+					451  580 4100000>;
+		qcom,step-chg-ranges = <3000000 3100000 1000000
+					3101000 3200000 1000000
+					3201000 3300000 1000000
+					3301000 4200000 5100000
+					4201000 4400000 4000000>;
 	};
 
 	vph_pwr: vph-pwr-regulator {
