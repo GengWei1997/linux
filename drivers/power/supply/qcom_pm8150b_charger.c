@@ -13,8 +13,9 @@
  * is copied here.  It covers the parts a Linux system needs: report the
  * battery state of charge, voltage and temperature, report the source that
  * was plugged in, and run a safe CC/CV charge with the limits the battery
- * profile asks for.  Step charging, JEITA and OTG boost are left to the
- * hardware defaults and are not driven from software here.
+ * profile asks for, derated by the profile's JEITA and step-charging
+ * tables.  OTG boost is left to the hardware defaults and is not driven
+ * from software here.
  */
 
 #include <linux/bitfield.h>
@@ -169,16 +170,38 @@
 /*
  * Lithium cells are damaged by charging outside this range, so charging is
  * held off well before the cell's own protection board has to act.  The
- * band is deliberately generous: ordinary operation sits near 25 C.
+ * band is the union of the JEITA table's ranges: inside it the tables
+ * derate the charge limits, outside it charging stops.  Ordinary
+ * operation sits near 25 C, in the middle of the table's full band.
  */
 #define TEMP_MIN_DECI_C			0	/* 0 C */
-#define TEMP_MAX_DECI_C			450	/* 45 C */
+#define TEMP_MAX_DECI_C			580	/* 58 C */
 
 /*
  * One out-of-range sample is not enough to act on, since the gauge's DMA
  * window can hand back a stale word.  Two in a row is a real reading.
  */
 #define TEMP_BAD_SAMPLES		2
+
+/*
+ * The battery profile's charge tables are consulted against the battery
+ * temperature and voltage, with a little hysteresis at the entry
+ * boundaries so a reading sitting on a boundary settles where it first
+ * landed instead of flapping between the two entries.
+ */
+#define JEITA_HYST_DECI_C		5	/* 0.5 C */
+#define STEP_HYST_UV			10000	/* 10 mV */
+
+/*
+ * In the warm JEITA band the float voltage is derated below the cell's
+ * maximum.  Charging is held off at the derated top and let back only
+ * once the cell has fallen away from it by this much, so the charger
+ * does not cycle on and off around the float.
+ */
+#define JEITA_HOLD_HYST_UV		70000	/* 70 mV */
+
+/* A profile carries up to this many breakpoints per table. */
+#define CHG_TABLE_MAX			8
 
 /*
  * Input current limits.  A standard downstream port is limited by the USB
@@ -241,6 +264,28 @@
 #define VBATT_DENR			1000
 #define FULL_SOC_RAW			255
 
+/*
+ * A breakpoint of one of the battery profile's charge tables: the reading
+ * in [low, high] asks for val.  The temperature tables carry decidegrees
+ * Celsius, the voltage table microvolts, and all of them microamps.
+ */
+struct chg_range {
+	int			low;
+	int			high;
+	int			val;
+};
+
+/*
+ * A parsed profile table and the entry it last matched, kept so a
+ * boundary crossing can be judged against where the reading just was,
+ * see chg_table_lookup().
+ */
+struct chg_table {
+	struct chg_range	entry[CHG_TABLE_MAX];
+	int			count;
+	int			index;
+};
+
 struct pm8150b_chg {
 	struct device		*dev;
 	struct regmap		*regmap;
@@ -252,6 +297,20 @@ struct pm8150b_chg {
 	unsigned int		fcc_ua;
 	unsigned int		icl_ua;
 	bool			icl_manual;	/* userspace took the limit */
+
+	/*
+	 * The limits the charger is actually programmed with: the maxima
+	 * above, lowered to whatever the profile's tables ask for at the
+	 * battery's present temperature and voltage.
+	 */
+	unsigned int		eff_fv_uv;
+	unsigned int		eff_fcc_ua;
+	bool			warm_hold;	/* derated float reached */
+
+	/* Charge tables from the battery profile, see chg_read_table(). */
+	struct chg_table	jeita_fcc;
+	struct chg_table	jeita_fv;
+	struct chg_table	step_fcc;
 
 	/*
 	 * Last state reported to userspace.  The charger is polled, so these
@@ -744,12 +803,17 @@ static int chg_get_status(struct pm8150b_chg *chg, int *status)
 		*status = POWER_SUPPLY_STATUS_CHARGING;
 		break;
 	case CHARGER_TERMINATE:
-	case CHARGER_INHIBIT:
 		*status = POWER_SUPPLY_STATUS_FULL;
 		break;
+	case CHARGER_INHIBIT:
 	case CHARGER_PAUSE:
 	case CHARGER_DISABLE:
 	default:
+		/*
+		 * Inhibited is charging held off by command, which is what
+		 * the temperature band and the warm JEITA hold do, so it is
+		 * a pause rather than a full battery.
+		 */
 		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
 		break;
 	}
@@ -926,17 +990,19 @@ static int chg_enable(struct pm8150b_chg *chg, bool enable)
 /*
  * Program a complete, safe charge configuration: the float voltage that
  * stops over-charge, the fast-charge current, and an input current limit
- * left to the hardware's source detection.
+ * left to the hardware's source detection.  The charge limits are the
+ * effective ones, so the profile's tables apply from the very first
+ * charge; see chg_update_limits().
  */
 static int chg_configure(struct pm8150b_chg *chg)
 {
 	int rc;
 
-	rc = chg_set_float_voltage(chg, chg->fv_uv);
+	rc = chg_set_float_voltage(chg, chg->eff_fv_uv);
 	if (rc < 0)
 		return dev_err_probe(chg->dev, rc, "float voltage\n");
 
-	rc = chg_set_fcc(chg, chg->fcc_ua);
+	rc = chg_set_fcc(chg, chg->eff_fcc_ua);
 	if (rc < 0)
 		return dev_err_probe(chg->dev, rc, "charge current\n");
 
@@ -949,6 +1015,93 @@ static int chg_configure(struct pm8150b_chg *chg)
 		return dev_err_probe(chg->dev, rc, "charge enable\n");
 
 	return 0;
+}
+
+/*
+ * Find the table entry a reading falls in.  Readings outside the table
+ * are clamped to its ends, and a move to a neighbouring entry only takes
+ * effect once the reading is clear of the boundary by the table's
+ * hysteresis, so a reading sitting on a boundary settles where it first
+ * landed instead of flapping between the two entries.
+ */
+static int chg_table_lookup(struct chg_table *tbl, int reading, int hyst,
+			    int *val)
+{
+	int i, prev;
+
+	if (!tbl->count)
+		return -ENODATA;
+
+	for (i = 0; i < tbl->count; i++) {
+		if (reading >= tbl->entry[i].low &&
+		    reading <= tbl->entry[i].high)
+			break;
+	}
+
+	if (i == tbl->count)
+		i = reading < tbl->entry[0].low ? 0 : tbl->count - 1;
+
+	prev = tbl->index;
+	if (prev >= 0) {
+		if (i == prev + 1 && reading < tbl->entry[i].low + hyst)
+			i = prev;
+		else if (i == prev - 1 && reading > tbl->entry[i].high - hyst)
+			i = prev;
+	}
+
+	tbl->index = i;
+	*val = tbl->entry[i].val;
+
+	return 0;
+}
+
+/*
+ * Combine the profile's JEITA and step-charging tables into the charge
+ * limits in effect: the tables only ever lower the profile maxima, and
+ * only JEITA derates the float voltage.  A derated float marks the warm
+ * band, where charging is held off at the derated top instead of being
+ * left to cycle around it; see JEITA_HOLD_HYST_UV.
+ */
+static bool chg_update_limits(struct pm8150b_chg *chg)
+{
+	unsigned int fcc_ua = chg->fcc_ua, fv_uv = chg->fv_uv;
+	bool changed = false;
+	int vbat_uv, val;
+
+	if (!chg_table_lookup(&chg->jeita_fcc, chg->temp_deci,
+			      JEITA_HYST_DECI_C, &val))
+		fcc_ua = min_t(unsigned int, fcc_ua, val);
+
+	if (!chg_table_lookup(&chg->jeita_fv, chg->temp_deci,
+			      JEITA_HYST_DECI_C, &val))
+		fv_uv = min_t(unsigned int, fv_uv, val);
+
+	if (!fg_get_voltage_uv(chg, &vbat_uv)) {
+		if (!chg_table_lookup(&chg->step_fcc, vbat_uv,
+				      STEP_HYST_UV, &val))
+			fcc_ua = min_t(unsigned int, fcc_ua, val);
+
+		if (fv_uv < chg->fv_uv) {
+			if (vbat_uv > fv_uv)
+				chg->warm_hold = true;
+			else if (vbat_uv < fv_uv - JEITA_HOLD_HYST_UV)
+				chg->warm_hold = false;
+		} else {
+			chg->warm_hold = false;
+		}
+	}
+
+	if (fcc_ua != chg->eff_fcc_ua && !chg_set_fcc(chg, fcc_ua)) {
+		chg->eff_fcc_ua = fcc_ua;
+		changed = true;
+	}
+
+	if (fv_uv != chg->eff_fv_uv && !chg_set_float_voltage(chg, fv_uv)) {
+		chg->eff_fv_uv = fv_uv;
+		changed = true;
+	}
+
+	return changed;
 }
 
 /* ------------------------- power supply ------------------------------- */
@@ -993,6 +1146,18 @@ static int chg_battery_get_property(struct power_supply *psy,
 		if (!chg->temp_valid)
 			return -EAGAIN;
 		val->intval = chg->temp_deci;
+		rc = 0;
+		break;
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+		/*
+		 * The limit in effect, after the profile's charge tables
+		 * have spoken; the maximum stays in the battery description.
+		 */
+		val->intval = chg->eff_fcc_ua;
+		rc = 0;
+		break;
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
+		val->intval = chg->eff_fv_uv;
 		rc = 0;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
@@ -1108,6 +1273,8 @@ static enum power_supply_property chg_battery_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_MODEL_NAME,
@@ -1348,11 +1515,19 @@ static void chg_status_work(struct work_struct *work)
 		changed = true;
 	}
 
-	/* Hold charging off while the cell is outside its safe range. */
+	/*
+	 * The temperature band is the union of the JEITA table's ranges:
+	 * inside it the tables derate the charge limits as temperature and
+	 * voltage move, outside it charging is held off entirely.
+	 */
 	if (chg->temp_valid) {
 		if (chg->temp_deci >= TEMP_MIN_DECI_C &&
 		    chg->temp_deci <= TEMP_MAX_DECI_C) {
 			chg->temp_bad = 0;
+			if (chg_update_limits(chg))
+				changed = true;
+			if (chg->warm_hold)
+				allow = false;
 		} else if (++chg->temp_bad >= TEMP_BAD_SAMPLES) {
 			allow = false;
 		}
@@ -1416,12 +1591,59 @@ static const struct chg_irq chg_irqs[] = {
 /* ------------------------------- probe -------------------------------- */
 
 /*
+ * Parse one of the battery profile's charge tables: triplets of low
+ * bound, high bound and the value the cell asks for between them, in the
+ * profile's own units.  A battery may describe any subset of the tables;
+ * what is missing is simply not a derating source.  A table that is
+ * present but malformed is refused, since guessing its intent could
+ * charge the cell outside the profile.
+ */
+static int chg_read_table(struct device *dev, struct device_node *np,
+			  const char *name, struct chg_table *tbl)
+{
+	u32 data[CHG_TABLE_MAX * 3];
+	int count, i, rc;
+
+	count = of_property_count_elems_of_size(np, name, sizeof(u32));
+	if (count == -EINVAL)
+		return 0;
+	if (count < 0)
+		return dev_err_probe(dev, count, "%s\n", name);
+
+	if (!count || count % 3 || count / 3 > CHG_TABLE_MAX)
+		return dev_err_probe(dev, -EINVAL,
+				     "%s: expected up to %d <low high value> triplets\n",
+				     name, CHG_TABLE_MAX);
+
+	rc = of_property_read_u32_array(np, name, data, count);
+	if (rc < 0)
+		return dev_err_probe(dev, rc, "%s\n", name);
+
+	tbl->count = count / 3;
+	tbl->index = -1;
+	for (i = 0; i < tbl->count; i++) {
+		tbl->entry[i].low = data[i * 3];
+		tbl->entry[i].high = data[i * 3 + 1];
+		tbl->entry[i].val = data[i * 3 + 2];
+		dev_dbg(dev, "%s: %d..%d -> %d\n", name, tbl->entry[i].low,
+			tbl->entry[i].high, tbl->entry[i].val);
+	}
+
+	dev_info(dev, "%s: %d entries\n", name, tbl->count);
+	return 0;
+}
+
+/*
  * The charge limits come from the battery's own description, so they stay
- * with whichever cell is fitted rather than with the board.
+ * with whichever cell is fitted rather than with the board.  The JEITA
+ * and step-charging breakpoints belong to the same description: they are
+ * what the cell vendor's profile asks for at each temperature and
+ * voltage, and travel with the cell.
  */
 static int chg_read_battery_limits(struct pm8150b_chg *chg)
 {
 	struct power_supply_battery_info *info;
+	struct device_node *np;
 	int rc;
 
 	rc = power_supply_get_battery_info(chg->battery, &info);
@@ -1432,6 +1654,22 @@ static int chg_read_battery_limits(struct pm8150b_chg *chg)
 	chg->fcc_ua = info->constant_charge_current_max_ua;
 
 	power_supply_put_battery_info(chg->battery, info);
+
+	np = of_parse_phandle(chg->dev->of_node, "monitored-battery", 0);
+	if (np) {
+		rc = chg_read_table(chg->dev, np, "qcom,jeita-fcc-ranges",
+				    &chg->jeita_fcc);
+		if (!rc)
+			rc = chg_read_table(chg->dev, np,
+					    "qcom,jeita-fv-ranges",
+					    &chg->jeita_fv);
+		if (!rc)
+			rc = chg_read_table(chg->dev, np, "qcom,step-chg-ranges",
+					    &chg->step_fcc);
+		of_node_put(np);
+		if (rc)
+			return rc;
+	}
 
 	/*
 	 * Float voltage is what stops over-charge, so an implausible value
@@ -1448,6 +1686,10 @@ static int chg_read_battery_limits(struct pm8150b_chg *chg)
 		return dev_err_probe(chg->dev, -EINVAL,
 				     "charge current %u uA out of range\n",
 				     chg->fcc_ua);
+
+	/* The tables only ever lower these, see chg_update_limits(). */
+	chg->eff_fv_uv = chg->fv_uv;
+	chg->eff_fcc_ua = chg->fcc_ua;
 
 	return 0;
 }
@@ -1558,7 +1800,7 @@ static int chg_hw_init(struct pm8150b_chg *chg)
 	/* Take whatever the attached source is good for. */
 	chg_update_input(chg);
 
-	/* Charging is enabled; only the temperature check can hold it off. */
+	/* Charging is enabled; only the battery's policy can hold it off. */
 	chg->charge_allowed = true;
 	return 0;
 }
