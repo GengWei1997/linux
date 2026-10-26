@@ -996,6 +996,26 @@
 };
 
 /*
+ * The PM8150 RTC's write channel is not owned by the APPS CPU (the PMIC
+ * arbiter denies the SPMI writes), so the free-running counter can never
+ * be programmed.  Use the driver's offset storage instead: the counter
+ * free-runs and the offset between it and wall time lives in the
+ * battery-backed SDAM.  This is plain hardware storage, so hctosys sets
+ * the right time at boot and hwclock works, with no bootloader or
+ * userspace involvement.
+ */
+&pm8150_sdam_b6 {
+	rtc_offset: offset@48 {
+		reg = <0x48 0x4>;
+	};
+};
+
+&pm8150_rtc {
+	nvmem-cells = <&rtc_offset>;
+	nvmem-cell-names = "offset";
+};
+
+/*
  * Adreno 640 GPU with GMU.  Three pieces of firmware are needed and all
  * of them come from the device's own vendor partition: the SQE microcode
  * (a630_sqe.fw), the GMU firmware (a640_gmu.bin) and the signed zap
