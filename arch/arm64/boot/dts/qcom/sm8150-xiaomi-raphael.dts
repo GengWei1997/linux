@@ -161,6 +161,22 @@
 		regulator-boot-on;
 		regulator-always-on;
 	};
+
+	/*
+	 * The AMOLED's 3.0 V source rail, gated by a load switch on
+	 * TLMM 99.
+	 */
+	disp_vci: regulator-disp-vci {
+		compatible = "regulator-fixed";
+		regulator-name = "disp_vci";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+
+		gpio = <&tlmm 99 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		start-delay-us = <4000>;
+	};
 };
 
 &apps_rsc {
@@ -696,6 +712,19 @@
 		bias-disable;
 		output-high;
 	};
+
+	/*
+	 * The panel's TE signal, wired to the display subsystem's vsync
+	 * input on TLMM 8.  The DPU paces command mode transfers on it in
+	 * hardware; the vendor tree muxes it at 2 mA with a pull-down in
+	 * both the active and the suspend state.
+	 */
+	disp_te_default: disp-te-default-state {
+		pins = "gpio8";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
 };
 
 /*
@@ -925,4 +954,58 @@
 	 * back for the gadget.
 	 */
 	dpdm-supply = <&usb_1_hsphy>;
+};
+
+/*
+ * The panel is a Samsung EA8076 AMOLED (1080x2340) on DSI 0.  The
+ * bootloader brings the pipeline up and leaves it scanning, but nothing
+ * in Linux owns the display and the picture falls apart into the panel's
+ * no-signal pattern once the system is up.  Take the DPU, the DSI
+ * controller and its PHY over from here and let the panel driver finish
+ * the job through the DSI host.
+ */
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	status = "okay";
+
+	vdda-supply = <&vreg_l3c_1p2>;
+
+	/*
+	 * The msm DSI host picks its pinctrl states when the link is
+	 * powered; both states are the TE pin kept at the display
+	 * subsystem's vsync input.
+	 */
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&disp_te_default>;
+	pinctrl-1 = <&disp_te_default>;
+
+	panel@0 {
+		compatible = "samsung,ea8076";
+		reg = <0>;
+
+		vddio-supply = <&vreg_l14a_1p8>;
+		vcie-supply = <&disp_vci>;
+
+		reset-gpios = <&tlmm 59 GPIO_ACTIVE_LOW>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&panel_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
+	status = "okay";
+
+	vdds-supply = <&vreg_l5a_0p875>;
 };
