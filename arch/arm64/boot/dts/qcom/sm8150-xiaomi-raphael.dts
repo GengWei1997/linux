@@ -506,26 +506,11 @@
 };
 
 /*
- * Bring-up scope: no firmware loaders are available yet, so keep the
- * remoteprocs and the GPU off.  Probing them only adds ~10 s of timeouts
- * each to the boot.
+ * Bring-up scope: the modem / ADSP / CDSP / SLPI firmware loaders are not
+ * wired up yet, so keep those remoteprocs off.  Probing them only adds
+ * ~10 s of timeouts each to the boot.  The GPU and the display are
+ * enabled further down.
  */
-&gmu {
-	status = "disabled";
-};
-
-&gpu {
-	status = "disabled";
-};
-
-&gpu_zap_shader {
-	status = "disabled";
-};
-
-&mdss {
-	status = "disabled";
-};
-
 &remoteproc_adsp {
 	status = "disabled";
 };
@@ -1008,4 +993,27 @@
 	status = "okay";
 
 	vdds-supply = <&vreg_l5a_0p875>;
+};
+
+/*
+ * Adreno 640 GPU with GMU.  Three pieces of firmware are needed and all
+ * of them come from the device's own vendor partition: the SQE microcode
+ * (a630_sqe.fw), the GMU firmware (a640_gmu.bin) and the signed zap
+ * shader.  The zap shader is loaded through PAS into the secure world
+ * and uses the CP to switch the GPU out of secure mode; without it the
+ * driver would have to poke RBBM_SECVID_TRUST_CNTL itself, which the
+ * secure world blocks on this device.  The split mdt/bXX zap image is
+ * packed into a single .mbn with pil-squasher, upstream linux-firmware
+ * style.
+ */
+&gmu {
+	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8150/a640_zap.mbn";
 };
