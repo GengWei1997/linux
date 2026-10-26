@@ -8456,6 +8456,7 @@ M:	GengWei1997 <gw19970326@gmail.com>
 L:	dri-devel@lists.freedesktop.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/display/panel/samsung,ea8076.yaml
+F:	drivers/gpu/drm/panel/panel-samsung-ea8076.c
 
 DRM DRIVER FOR SAMSUNG MIPI DSIM BRIDGE
 M:	Inki Dae <inki.dae@samsung.com>

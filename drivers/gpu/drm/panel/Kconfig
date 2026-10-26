@@ -943,6 +943,17 @@ config DRM_PANEL_SAMSUNG_DB7430
 	  DB7430 DPI display controller used in such devices as the
 	  LMS397KF04 480x800 DPI panel.
 
+config DRM_PANEL_SAMSUNG_EA8076
+	tristate "Samsung EA8076 panel"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y or M here if you want to enable support for the Samsung
+	  EA8076 FHD Plus (1080x2340) AMOLED panel found in the Xiaomi
+	  Redmi K20 Pro.  The panel is a command mode panel driven over
+	  a 4-lane MIPI-DSI link, with brightness over DCS.
+
 config DRM_PANEL_SAMSUNG_LD9040
 	tristate "Samsung LD9040 RGB/SPI panel"
 	depends on OF && SPI
