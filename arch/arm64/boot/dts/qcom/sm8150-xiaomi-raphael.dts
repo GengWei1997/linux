@@ -506,10 +506,10 @@
 };
 
 /*
- * Bring-up scope: the modem / ADSP / CDSP / SLPI firmware loaders are not
- * wired up yet, so keep those remoteprocs off.  Probing them only adds
- * ~10 s of timeouts each to the boot.  The GPU and the display are
- * enabled further down.
+ * Bring-up scope: the ADSP and CDSP firmware loaders are not wired up
+ * yet, so keep those remoteprocs off.  Probing them only adds ~10 s of
+ * timeouts each to the boot.  The GPU and the display are enabled
+ * further down.
  */
 &remoteproc_adsp {
 	status = "disabled";
@@ -535,7 +535,16 @@
 };
 
 &remoteproc_slpi {
-	status = "disabled";
+	/*
+	 * The sensor low-power island firmware is the usual split PIL
+	 * image on the modem partition (slpi_rp.mdt + slpi_rp.bXX),
+	 * squashed into a single .mbn with pil-squasher like the modem
+	 * image above; slpir.jsn / slpius.jsn, the sensor registry files
+	 * the SLPI requests at runtime, sit next to it.  The SLPI owns
+	 * the accelerometer, gyroscope, proximity and light sensors.
+	 */
+	firmware-name = "qcom/sm8150/Xiaomi/raphael/slpi_rp.mbn";
+	status = "okay";
 };
 
 &wifi {

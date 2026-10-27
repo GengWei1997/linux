@@ -318,6 +318,8 @@ struct fastrpc_channel_ctx {
 	struct fastrpc_device *secure_fdevice;
 	struct fastrpc_device *fdevice;
 	struct fastrpc_buf *remote_heap;
+	phys_addr_t remote_heap_addr;
+	u64 remote_heap_size;
 	struct list_head invoke_interrupted_mmaps;
 	bool secure;
 	bool unsigned_support;
@@ -1099,7 +1101,7 @@ static int fastrpc_get_args(u32 kernel, struct fastrpc_invoke_ctx *ctx)
 
 	ctx->msg_sz = pkt_size;
 
-	if (ctx->fl->sctx->sid)
+	if (ctx->fl->sctx->sid && ctx->fl->pd != SENSORS_PD)
 		err = fastrpc_buf_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
 	else
 		err = fastrpc_remote_heap_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
@@ -2585,13 +2587,26 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 		u64 src_perms;
 
 		err = of_reserved_mem_region_to_resource(rdev->of_node, 0, &res);
-		if (!err) {
+		if (!err && data->vmcount) {
 			src_perms = BIT(QCOM_SCM_VMID_HLOS);
 
 			err = qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
 				    data->vmperms, data->vmcount);
-			if (err)
+			if (err == -EINVAL) {
+				/*
+				 * Some firmware keeps the remote heap assigned
+				 * across remote restarts and rejects assigning
+				 * what it already owns.  The heap stays usable,
+				 * so continue probing instead of leaving the
+				 * FastRPC node dead after a recovery.
+				 */
+				dev_warn(rdev, "remote heap already assigned\n");
+			} else if (err) {
 				goto err_free_data;
+			} else {
+				data->remote_heap_addr = res.start;
+				data->remote_heap_size = resource_size(&res);
+			}
 		}
 
 	}
@@ -2696,6 +2711,27 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 
 	if (cctx->remote_heap)
 		fastrpc_buf_free(cctx->remote_heap);
+
+	if (cctx->remote_heap_size && cctx->vmcount) {
+		u64 src_perms = 0;
+		struct qcom_scm_vmperm dst_perms;
+		int i, err;
+
+		for (i = 0; i < cctx->vmcount; i++)
+			src_perms |= BIT(cctx->vmperms[i].vmid);
+
+		dst_perms.vmid = QCOM_SCM_VMID_HLOS;
+		dst_perms.perm = QCOM_SCM_PERM_RWX;
+
+		err = qcom_scm_assign_mem(cctx->remote_heap_addr,
+					  cctx->remote_heap_size, &src_perms,
+					  &dst_perms, 1);
+		if (err)
+			dev_err(&rpdev->dev,
+				"Failed to assign memory back to HLOS: addr %pa size %#llx err %d\n",
+				&cctx->remote_heap_addr, cctx->remote_heap_size,
+				err);
+	}
 
 	of_platform_depopulate(&rpdev->dev);
 

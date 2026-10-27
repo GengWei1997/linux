@@ -783,6 +783,14 @@
 			no-map;
 		};
 
+		fastrpc_mem: fastrpc {
+			compatible = "shared-dma-pool";
+			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
+			alignment = <0x0 0x400000>;
+			size = <0x0 0x1000000>;
+			reusable;
+		};
+
 		ipa_fw_mem: memory@98f00000 {
 			reg = <0x0 0x98f00000 0x0 0x10000>;
 			no-map;
@@ -2240,6 +2248,9 @@
 					qcom,glink-channels = "fastrpcglink-apps-dsp";
 					label = "sdsp";
 					qcom,non-secure-domain;
+					qcom,vmids = <QCOM_SCM_VMID_HLOS QCOM_SCM_VMID_MSS_MSA
+						      QCOM_SCM_VMID_SSC_Q6 QCOM_SCM_VMID_ADSP_Q6>;
+					memory-region = <&fastrpc_mem>;
 					#address-cells = <1>;
 					#size-cells = <0>;
 
