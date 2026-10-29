@@ -329,6 +329,29 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
 
 static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
 {
+	struct qrtr_ctrl_pkt pkt;
+	struct msghdr msg = { };
+	struct kvec iv;
+	int ret;
+
+	iv.iov_base = &pkt;
+	iv.iov_len = sizeof(pkt);
+
+	memset(&pkt, 0, sizeof(pkt));
+	pkt.cmd = cpu_to_le32(QRTR_TYPE_HELLO);
+
+	msg.msg_name = (struct sockaddr *)sq;
+	msg.msg_namelen = sizeof(*sq);
+
+	/* Open the handshake explicitly: the endpoint layer refuses any
+	 * non-HELLO traffic until our own HELLO has been sent, and the
+	 * remote's HELLO can be processed before that happens.  Send our
+	 * HELLO first so the server announcement below is not dropped.
+	 */
+	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
+	if (ret < 0 && ret != -ENODEV)
+		pr_err("failed to send hello\n");
+
 	return announce_servers(sq);
 }
 
