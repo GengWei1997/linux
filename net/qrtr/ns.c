@@ -327,6 +327,27 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
 	return 0;
 }
 
+/* Forget the observers registered by a node.  Used when the node leaves or
+ * restarts, so that stale lookups neither leak the bounded lookup slots nor
+ * keep being notified after the node's registrations are gone.
+ */
+static void lookups_del_node(unsigned int node_id)
+{
+	struct qrtr_lookup *lookup;
+	struct list_head *tmp;
+	struct list_head *li;
+
+	list_for_each_safe(li, tmp, &qrtr_ns.lookups) {
+		lookup = container_of(li, struct qrtr_lookup, li);
+		if (lookup->sq.sq_node != node_id)
+			continue;
+
+		list_del(&lookup->li);
+		kfree(lookup);
+		qrtr_ns.lookup_count--;
+	}
+}
+
 static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
 {
 	struct qrtr_ctrl_pkt pkt;
@@ -336,6 +357,12 @@ static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
 
 	iv.iov_base = &pkt;
 	iv.iov_len = sizeof(pkt);
+
+	/* A node announcing itself is (re)starting; observers registered by
+	 * its previous instance are gone with it.
+	 */
+	if (sq->sq_node != qrtr_ns.local_node)
+		lookups_del_node(sq->sq_node);
 
 	memset(&pkt, 0, sizeof(pkt));
 	pkt.cmd = cpu_to_le32(QRTR_TYPE_HELLO);
@@ -373,6 +400,9 @@ static int ctrl_cmd_bye(struct sockaddr_qrtr *from)
 	node = node_get(from->sq_node);
 	if (!node)
 		return 0;
+
+	/* Drop any observers registered by the departing node */
+	lookups_del_node(from->sq_node);
 
 	/* Advertise removal of this client to all servers of remote node */
 	xa_for_each(&node->servers, index, srv)
@@ -566,10 +596,9 @@ static int ctrl_cmd_new_lookup(struct sockaddr_qrtr *from,
 	unsigned long node_idx;
 	unsigned long srv_idx;
 
-	/* Accept only local observers */
-	if (from->sq_node != qrtr_ns.local_node)
-		return -EINVAL;
-
+	/* Accept observers from any node: the modem looks up AP-side
+	 * services (e.g. remote storage) the same way local clients do.
+	 */
 	if (qrtr_ns.lookup_count >= QRTR_NS_MAX_LOOKUPS) {
 		pr_err_ratelimited("QRTR client node exceeds max lookup limit!\n");
 		return -ENOSPC;
