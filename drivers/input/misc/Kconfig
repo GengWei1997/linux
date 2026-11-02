@@ -236,6 +236,19 @@ config INPUT_PMIC8XXX_PWRKEY
 	  To compile this driver as a module, choose M here: the
 	  module will be called pmic8xxx-pwrkey.
 
+config INPUT_QCOM_PM8150B_HAPTICS
+	tristate "Qualcomm PM8150B haptics support"
+	depends on MFD_SPMI_PMIC || COMPILE_TEST
+	select INPUT_FF_MEMLESS
+	help
+	  Say Y here to enable support for the haptics block in the
+	  Qualcomm PM8150B PMIC, which drives an ERM vibration actuator
+	  through an internal H-bridge.  The actuator is exposed as a
+	  force-feedback device.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called qcom-pm8150b-haptics.
+
 config INPUT_SPARCSPKR
 	tristate "SPARC Speaker support"
 	depends on PCI && SPARC64

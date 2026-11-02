@@ -196,6 +196,13 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
+		pm8150b_haptics: haptics@c000 {
+			compatible = "qcom,pm8150b-haptics";
+			reg = <0xc000>;
+
+			status = "disabled";
+		};
+
 		pm8150b_lpg: pwm {
 			compatible = "qcom,pm8150b-lpg";
 

@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/qcom,pm8150b-haptics.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm PM8150B haptics block
+
+maintainers:
+  - GengWei1997 <gw19970326@gmail.com>
+
+description: |
+  The PM8150B PMIC contains an H-bridge with a DAC that drives a vibration
+  actuator on its HAP_OUT_P/HAP_OUT_M pins.  The DAC plays a level clocked by
+  the internal play-rate generator, so the drive amplitude sets the vibration
+  strength.
+
+  Only direct play of a constant level is described here, which is what an
+  ERM actuator uses.
+
+properties:
+  compatible:
+    const: qcom,pm8150b-haptics
+
+  reg:
+    maxItems: 1
+
+  qcom,vmax-microvolt:
+    description: Maximum drive voltage across the actuator.
+    minimum: 116000
+    maximum: 3596000
+
+  qcom,play-rate-us:
+    description: Period of one output sample in microseconds.
+    default: 5715
+    minimum: 5
+    maximum: 20475
+
+required:
+  - compatible
+  - reg
+  - qcom,vmax-microvolt
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/spmi/spmi.h>
+
+    pmic@3 {
+        compatible = "qcom,pm8150b", "qcom,spmi-pmic";
+        reg = <0x3 SPMI_USID>;
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        haptics@c000 {
+            compatible = "qcom,pm8150b-haptics";
+            reg = <0xc000>;
+
+            qcom,vmax-microvolt = <3000000>;
+        };
+    };

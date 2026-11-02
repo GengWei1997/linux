@@ -912,6 +912,17 @@
 };
 
 /*
+ * The vibration actuator is wired straight to PM8150B's H-bridge, on the
+ * HAP_OUT_P/HAP_OUT_M pair.  It is an ERM, a rotating mass driven by a DC
+ * level, so only the drive voltage has to be described.
+ */
+&pm8150b_haptics {
+	status = "okay";
+
+	qcom,vmax-microvolt = <3000000>;
+};
+
+/*
  * PM8150B SMB5 charger and GEN4 fuel gauge.
  *
  * The float voltage comes from the battery description above and is the
