@@ -865,8 +865,15 @@
  * network link use.  The USB3/DP combo PHY needs a module that is not
  * available in the initramfs, and leaving it in the DWC3 PHY list makes the
  * controller defer forever, so only the HS PHY is wired up.
+ *
+ * Without the combo PHY there is no PIPE clock, which is what the controller
+ * clocks its device-side endpoint commands from; leaving it to the QMP PHY
+ * makes every DEPCFG command time out and the gadget never enumerates.  Let
+ * the wrapper take the UTMI clock as the PIPE clock instead.
  */
 &usb_1 {
+	qcom,select-utmi-as-pipe-clk;
+
 	status = "okay";
 };
 
