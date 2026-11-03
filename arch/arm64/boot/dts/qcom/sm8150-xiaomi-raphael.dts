@@ -489,15 +489,26 @@
 };
 
 /*
- * Bring-up scope: the ADSP and CDSP firmware loaders are not wired up
- * yet, so keep those remoteprocs off.  Probing them only adds ~10 s of
- * timeouts each to the boot.  The GPU and the display are enabled
- * further down.
+ * The ADSP runs the audio DSP firmware and is the master of the SLIMbus
+ * instance the WCD9340 codec hangs off, so it has to be up for anything on
+ * the sound card to work.
+ *
+ * The image is the split PIL firmware from the phone's modem partition
+ * (adsp.mdt + adsp.bXX) squashed into a single .mbn with pil-squasher, the
+ * same way the modem and SLPI images below are handled; adspr.jsn and
+ * adspua.jsn are the audio calibration files the ADSP asks for at runtime
+ * and sit next to it.
  */
 &remoteproc_adsp {
-	status = "disabled";
+	firmware-name = "qcom/sm8150/Xiaomi/raphael/adsp.mbn";
+	status = "okay";
 };
 
+/*
+ * The CDSP only serves the compute DSP (fastrpc) workloads and is not
+ * needed for the hardware this board is being brought up with, so leave it
+ * off; probing it would only add a firmware timeout to the boot.
+ */
 &remoteproc_cdsp {
 	status = "disabled";
 };
