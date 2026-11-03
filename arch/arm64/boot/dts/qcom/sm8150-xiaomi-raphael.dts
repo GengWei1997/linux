@@ -1051,3 +1051,34 @@
 &gpu_zap_shader {
 	firmware-name = "qcom/sm8150/Xiaomi/raphael/a640_zap.mbn";
 };
+
+/*
+ * The Android bootloader leaves the splash screen it drew in a fixed
+ * 36 MiB frame at 0x9c000000.  Upstream sm8150.dtsi does not describe the
+ * region, so the page allocator would hand that range out as ordinary RAM
+ * even though the display controller may still be scanning out of it.
+ *
+ * The vendor tree keeps cont_splash_region@9c000000 at the same address and
+ * size, so reserve it here too.
+ *
+ * This does not silence the burst of translation faults that shows up right
+ * after the DRM device is registered:
+ *
+ *   arm-smmu 15000000.iommu: Unhandled context fault: fsr=0x402,
+ *     iova=0x9c000400, ... cbfrsynra=0xc20
+ *
+ * Those are the bootloader's scanout being read during the window before
+ * msm_kms.c installs its fault handler, and before the DPU reprograms the
+ * pipe.  All ten land within 15 ms of each other and never repeat, and the
+ * display comes up correctly afterwards, so they are noise rather than a
+ * live fault.  The iommu-addresses trick the Exynos boards use does not
+ * apply: msm builds a paging domain with iommu_paging_domain_alloc(), which
+ * does not honour IOMMU_RESV_DIRECT, and a plain reservation does not stop
+ * the hardware from issuing the reads.
+ */
+&{/reserved-memory} {
+	cont_splash_mem: memory@9c000000 {
+		reg = <0x0 0x9c000000 0x0 0x02400000>;
+		no-map;
+	};
+};
