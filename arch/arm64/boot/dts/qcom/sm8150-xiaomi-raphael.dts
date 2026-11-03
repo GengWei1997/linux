@@ -627,11 +627,15 @@
 };
 
 /*
- * SE12 is the plain debug UART (serial0/stdout-path above); keep it as
- * a fallback console on the debug header.
+ * SE12 is the plain debug UART behind serial0/stdout-path.  It keeps the
+ * qcom,geni-debug-uart compatible from sm8150.dtsi on purpose: that is the
+ * one whose match data makes the driver register the ttyMSM console, which
+ * is what console=ttyMSM0 on the kernel command line names.  With a plain
+ * qcom,geni-uart the port shows up as ttyHS0 instead and the console is
+ * never registered, which leaves /proc/consoles empty and makes
+ * plymouthd die on it.
  */
 &uart2 {
-	compatible = "qcom,geni-uart";
 	status = "okay";
 
 	pinctrl-names = "default";
