@@ -534,9 +534,18 @@
 	status = "okay";
 
 	/*
-	 * No local-mac-address on purpose (see the bluetooth node): the
-	 * factory WLAN MAC is per-device and provisioned at runtime from
-	 * the modem NV store by the raphael-macaddr service (ip link).
+	 * No local-mac-address on purpose.  The factory never provisioned a
+	 * WLAN address on this board: /vendor/firmware/wlan/qca_cld/
+	 * wlan_mac.bin is a symlink to /mnt/vendor/persist/wlan/wlan_mac.bin
+	 * and that file, nor the directory, exists.  So there is nothing to
+	 * read and ath10k falls back to a random address:
+	 *
+	 *   ath10k_snoc 18800000.wifi: invalid MAC address; choosing random
+	 *
+	 * bootmac@wlan.service then assigns a stable per-device address
+	 * derived from the serial number, and NetworkManager is told to keep
+	 * it (wifi.cloned-mac-address=preserve).  That happens after the PHY
+	 * is up, which is why the warning above stays in the log.
 	 */
 	vdd-0.8-cx-mx-supply = <&vreg_l1a_0p75>;
 	vdd-1.8-xo-supply = <&vreg_l7a_1p8>;
