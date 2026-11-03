@@ -1001,7 +1001,7 @@
 		vddio-supply = <&vreg_l14a_1p8>;
 		vcie-supply = <&disp_vci>;
 
-		reset-gpios = <&tlmm 59 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&tlmm 6 GPIO_ACTIVE_LOW>;
 
 		port {
 			panel_in: endpoint {
