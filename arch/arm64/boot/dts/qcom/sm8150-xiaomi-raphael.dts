@@ -541,6 +541,24 @@
 	status = "okay";
 };
 
+/*
+ * IPA carries the mobile data path: the modem hands AP-bound packets to
+ * this block, which delivers them to the net device the driver registers
+ * as rmnet_ipa0.  Without it the modem's control plane still works (SIM,
+ * SMS, calls, QMI) but there is no net device for data, which is what
+ * makes ModemManager give up with "Failed to find a net port".
+ *
+ * The firmware is a split PIL image in the vendor partition, not the
+ * modem partition: ipa_fws.mdt plus ipa_fws.bXX, squashed into a single
+ * .mbn with pil-squasher.  The trust zone authenticates it under PAS id
+ * 15, and it is the AP that loads it, which is what qcom,gsi-loader =
+ * "self" selects.
+ */
+&ipa {
+	firmware-name = "qcom/sm8150/Xiaomi/raphael/ipa_fws.mbn";
+	status = "okay";
+};
+
 &wifi {
 	status = "okay";
 
