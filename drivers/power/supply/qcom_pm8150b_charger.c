@@ -717,14 +717,17 @@ struct chg_source {
 	unsigned int			icl_ua;
 	bool				qc2;
 	bool				qc3;
+	bool				floating;	/* nothing on D+/D- */
 };
 
 /*
- * The pair is held by default and only a source that identifies as a host
- * gets it back: a charger has nowhere to enumerate to and needs the pair
- * for the QC handshake and for the voltage requests that follow.  A verdict
- * that has not settled yet changes nothing, so re-running the detection
- * does not yank the pair away in the middle of an enumeration.
+ * The pair is held by default: a charger has nowhere to enumerate to and
+ * needs D+/D- for the BC1.2 verdict and for the QC handshake that follows.
+ * A source that identifies as a host gets the pair back, since the gadget
+ * is the only thing that can talk to it.
+ *
+ * A floating pair is neither, and is resolved in favour of the PHY, see
+ * below.
  */
 static void chg_dpdm_policy(struct pm8150b_chg *chg, const struct chg_source *src)
 {
@@ -732,6 +735,22 @@ static void chg_dpdm_policy(struct pm8150b_chg *chg, const struct chg_source *sr
 
 	if (src->usb_type == POWER_SUPPLY_USB_TYPE_UNKNOWN)
 		return;
+
+	/*
+	 * A floating verdict means BC1.2 saw nothing identify the source:
+	 * either a dumb charger, or a host that was never given the pair.
+	 * Only the PHY can tell the two apart, because a host answers a
+	 * pull-up and a dumb charger does not, so the pair is handed over
+	 * and left there.  Re-running the detection here would be wrong:
+	 * BC1.2 drives the same lines the gadget is now using, and tearing
+	 * an enumeration down to classify it again helps nobody.  Nothing
+	 * is lost for a dumb charger either, as it speaks neither BC1.2 nor
+	 * QC and keeps charging at the float limit.
+	 */
+	if (src->floating) {
+		chg_dpdm_float(chg, false);
+		return;
+	}
 
 	host = src->usb_type == POWER_SUPPLY_USB_TYPE_SDP ||
 	       src->usb_type == POWER_SUPPLY_USB_TYPE_CDP;
@@ -790,12 +809,13 @@ static int chg_read_source(struct pm8150b_chg *chg, struct chg_source *src)
 	} else if (result & FLOAT_CHARGER) {
 		/*
 		 * Floating D+/D-: a dedicated charger that does not identify
-		 * itself, or a USB-C source that has not been asked yet.  The
-		 * conservative figure serves both.
+		 * itself, or a host whose enumeration the charger is
+		 * blocking.  The conservative current serves both.
 		 */
 		src->type = POWER_SUPPLY_TYPE_USB_DCP;
 		src->usb_type = POWER_SUPPLY_USB_TYPE_DCP;
 		src->icl_ua = ICL_FLOAT_UA;
+		src->floating = true;
 	} else if (result & CDP_CHARGER) {
 		src->type = POWER_SUPPLY_TYPE_USB_CDP;
 		src->usb_type = POWER_SUPPLY_USB_TYPE_CDP;
