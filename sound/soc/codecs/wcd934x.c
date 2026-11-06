@@ -546,11 +546,16 @@ struct wcd934x_codec {
 	int comp_enabled[COMPANDER_MAX];
 	int sysclk_users;
 	struct mutex sysclk_mutex;
+	/* MCLK is shared by the DAPM supply and the MBHC. */
+	int mclk_users;
+	struct mutex mclk_lock;
 	/* mbhc module */
 	struct wcd_mbhc *mbhc;
 	struct wcd_mbhc_config mbhc_cfg;
 	struct wcd_mbhc_intr intr_ids;
 	bool mbhc_started;
+	/* RX_BIAS borrowed by the plug classifier, restored on release. */
+	bool mbhc_bias_held;
 	struct mutex micb_lock;
 	u32 micb_ref[WCD934X_MAX_MICBIAS];
 	u32 pullup_ref[WCD934X_MAX_MICBIAS];
@@ -1341,34 +1346,60 @@ static int wcd934x_disable_ana_bias_and_syclk(struct wcd934x_codec *wcd)
 	return 0;
 }
 
+/*
+ * The MCLK is requested both by the DAPM power supply and by the MBHC while
+ * it probes the headset microphone bias.  The two do not pair their calls:
+ * the MBHC disables the bias it never enabled when a plug is being classified,
+ * which used to disable a clock that the DAPM side was still using.  Keep the
+ * reference count here so an unbalanced request cannot touch the clock.
+ */
 static int __wcd934x_cdc_mclk_enable(struct wcd934x_codec *wcd, bool enable)
 {
 	int ret = 0;
+	unsigned int swr;
+
+	guard(mutex)(&wcd->mclk_lock);
 
 	if (enable) {
-		ret = clk_prepare_enable(wcd->extclk);
+		if (wcd->mclk_users++)
+			return 0;
 
+		ret = clk_prepare_enable(wcd->extclk);
 		if (ret) {
+			wcd->mclk_users--;
 			dev_err(wcd->dev, "%s: ext clk enable failed\n",
 				__func__);
 			return ret;
 		}
+
 		ret = wcd934x_enable_ana_bias_and_sysclk(wcd);
-	} else {
-		int val;
+		if (ret) {
+			clk_disable_unprepare(wcd->extclk);
+			wcd->mclk_users--;
+		}
 
-		regmap_read(wcd->regmap, WCD934X_CDC_CLK_RST_CTRL_SWR_CONTROL,
-			    &val);
-
-		/* Don't disable clock if soundwire using it.*/
-		if (val & WCD934X_CDC_SWR_CLK_EN_MASK)
-			return 0;
-
-		wcd934x_disable_ana_bias_and_syclk(wcd);
-		clk_disable_unprepare(wcd->extclk);
+		return ret;
 	}
 
-	return ret;
+	if (!wcd->mclk_users) {
+		dev_warn(wcd->dev, "%s: unbalanced MCLK disable\n", __func__);
+		return 0;
+	}
+	if (--wcd->mclk_users)
+		return 0;
+
+	/*
+	 * SoundWire can hold the codec clock on its own, in which case the
+	 * clock tree is left running.
+	 */
+	regmap_read(wcd->regmap, WCD934X_CDC_CLK_RST_CTRL_SWR_CONTROL, &swr);
+	if (swr & WCD934X_CDC_SWR_CLK_EN_MASK)
+		return 0;
+
+	wcd934x_disable_ana_bias_and_syclk(wcd);
+	clk_disable_unprepare(wcd->extclk);
+
+	return 0;
 }
 
 static int wcd934x_codec_enable_mclk(struct snd_soc_dapm_widget *w,
@@ -2309,6 +2340,37 @@ static void wcd934x_mbhc_mbhc_bias_control(struct snd_soc_component *component,
 				      WCD934X_ANA_MBHC_BIAS_EN, enable);
 }
 
+/*
+ * RX_BIAS feeds the plug detection comparators.  DAPM switches it on only
+ * for an active receive path, so a plug that arrives with no stream running
+ * is classified from a floating input.  Keep it asserted while the plug is
+ * being examined and let DAPM own it again afterwards.
+ */
+static void wcd934x_mbhc_bias_hold(struct snd_soc_component *component,
+				   bool enable)
+{
+	struct wcd934x_codec *wcd = dev_get_drvdata(component->dev);
+
+	if (enable) {
+		if (wcd->mbhc_bias_held)
+			return;
+
+		if (snd_soc_component_read(component, WCD934X_ANA_RX_SUPPLIES) & 0x01)
+			return;
+
+		snd_soc_component_update_bits(component, WCD934X_ANA_RX_SUPPLIES,
+					      0x01, 0x01);
+		wcd->mbhc_bias_held = true;
+	} else {
+		if (!wcd->mbhc_bias_held)
+			return;
+
+		snd_soc_component_update_bits(component, WCD934X_ANA_RX_SUPPLIES,
+					      0x01, 0x00);
+		wcd->mbhc_bias_held = false;
+	}
+}
+
 static void wcd934x_mbhc_program_btn_thr(struct snd_soc_component *component,
 					 int *btn_low, int *btn_high,
 					 int num_btn, bool is_micbias)
@@ -2448,17 +2510,16 @@ static int wcd934x_mbhc_request_micbias(struct snd_soc_component *component,
 					int micb_num, int req)
 {
 	struct wcd934x_codec *wcd = dev_get_drvdata(component->dev);
-	int ret;
 
-	if (req == MICB_ENABLE)
-		__wcd934x_cdc_mclk_enable(wcd, true);
+	/*
+	 * The MBHC asks for the headset bias far more often than it enables
+	 * it, so it must not drive the codec clock: a stray disable would drop
+	 * the clock the jack detection itself runs on.  The clock is held for
+	 * the whole lifetime of the jack by wcd934x_codec_set_jack().
+	 */
+	WARN_ON_ONCE(!wcd->mbhc_started);
 
-	ret = wcd934x_micbias_control(component, micb_num, req, false);
-
-	if (req == MICB_DISABLE)
-		__wcd934x_cdc_mclk_enable(wcd, false);
-
-	return ret;
+	return wcd934x_micbias_control(component, micb_num, req, false);
 }
 
 static void wcd934x_mbhc_micb_ramp_control(struct snd_soc_component *component,
@@ -2692,6 +2753,8 @@ static void wcd934x_wcd_mbhc_calc_impedance(struct snd_soc_component *component,
 	int32_t z1L, z1R, z1Ls;
 	int zMono, z_diff1, z_diff2;
 	bool is_fsm_disable = false;
+	unsigned int hph;
+	unsigned int isrc_en;
 	struct wcd934x_mbhc_zdet_param zdet_param[] = {
 		{4, 0, 4, 0x08, 0x14, 0x18}, /* < 32ohm */
 		{2, 0, 3, 0x18, 0x7C, 0x90}, /* 32ohm < Z < 400ohm */
@@ -2725,6 +2788,30 @@ static void wcd934x_wcd_mbhc_calc_impedance(struct snd_soc_component *component,
 	/* Turn off 100k pull down on HPHL */
 	regmap_update_bits(wcd934x->regmap, WCD934X_ANA_MBHC_MECH, 0x01, 0x00);
 
+	/*
+	 * ELECT_ISRC_EN drives a current source into the plug.  It is left
+	 * set when the plug was classified as a line output, and while it is
+	 * on the impedance ramp cannot settle, so every measurement comes
+	 * back as zero and a perfectly good headset is reported as mono.
+	 * Turn it off for the duration of the measurement.
+	 */
+	isrc_en = snd_soc_component_read(component, WCD934X_ANA_MBHC_ZDET) & 0x02;
+	if (isrc_en)
+		snd_soc_component_update_bits(component, WCD934X_ANA_MBHC_ZDET,
+					      0x02, 0x00);
+
+	/*
+	 * The impedance ramp needs the Class-H output stage powered.  Bits
+	 * 3:2 of ANA_HPH hold the power level and are only programmed by
+	 * DAPM when a headphone stream starts, so before the first stream
+	 * the field can read back as zero.  The comparator then has no bias,
+	 * every ramp returns x1 = 0 and the plug is reported as mono.
+	 */
+	hph = snd_soc_component_read(component, WCD934X_ANA_HPH);
+	if (!(hph & 0x0c))
+		snd_soc_component_update_bits(component, WCD934X_ANA_HPH,
+					      0x0c, 0x0c);
+
 	/* First get impedance on Left */
 	d1 = d1_a[1];
 	zdet_param_ptr = &zdet_param[1];
@@ -2757,7 +2844,7 @@ left_ch_impedance:
 		*zl = z1L/1000;
 		wcd934x_wcd_mbhc_qfuse_cal(component, zl, 0);
 	}
-	dev_info(component->dev, "%s: impedance on HPH_L = %d(ohms)\n",
+	dev_dbg(component->dev, "%s: impedance on HPH_L = %d(ohms)\n",
 		__func__, *zl);
 
 	/* Start of right impedance ramp and calculation */
@@ -2849,6 +2936,14 @@ zdet_complete:
 	if (wcd934x->mbhc_cfg.hphl_swh)
 		regmap_update_bits(wcd934x->regmap, WCD934X_ANA_MBHC_MECH, 0x80, 0x80);
 
+	/* Put back the Class-H power level the measurement borrowed. */
+	if (!(hph & 0x0c))
+		snd_soc_component_update_bits(component, WCD934X_ANA_HPH, 0x0c, 0x00);
+
+	if (isrc_en)
+		snd_soc_component_update_bits(component, WCD934X_ANA_MBHC_ZDET,
+					      0x02, 0x02);
+
 	snd_soc_component_write(component, WCD934X_MBHC_NEW_ZDET_ANA_CTL, reg4);
 	snd_soc_component_write(component, WCD934X_MBHC_CTL_CLK, reg3);
 	if (is_fsm_disable)
@@ -2892,6 +2987,7 @@ static const struct wcd_mbhc_cb mbhc_cb = {
 	.compute_impedance = wcd934x_wcd_mbhc_calc_impedance,
 	.mbhc_gnd_det_ctrl = wcd934x_mbhc_gnd_det_ctrl,
 	.hph_pull_down_ctrl = wcd934x_mbhc_hph_pull_down_ctrl,
+	.mbhc_bias_hold = wcd934x_mbhc_bias_hold,
 };
 
 static int wcd934x_get_hph_type(struct snd_kcontrol *kcontrol,
@@ -5761,9 +5857,27 @@ static int wcd934x_codec_set_jack(struct snd_soc_component *comp,
 
 	if (jack && !wcd->mbhc_started) {
 		ret = wcd_mbhc_start(wcd->mbhc, &wcd->mbhc_cfg, jack);
+		if (ret)
+			return ret;
+
+		/*
+		 * The plug detect comparator and its pull-up current live in
+		 * the analog block and stop working as soon as the codec bias
+		 * is gone.  The MBHC only asks for the bias around a single
+		 * measurement, so hold a reference for as long as the jack is
+		 * being watched, otherwise the second plug in never raises an
+		 * interrupt.
+		 */
+		ret = __wcd934x_cdc_mclk_enable(wcd, true);
+		if (ret) {
+			wcd_mbhc_stop(wcd->mbhc);
+			return ret;
+		}
+
 		wcd->mbhc_started = true;
 	} else if (wcd->mbhc_started) {
 		wcd_mbhc_stop(wcd->mbhc);
+		__wcd934x_cdc_mclk_enable(wcd, false);
 		wcd->mbhc_started = false;
 	}
 
@@ -5849,6 +5963,7 @@ static int wcd934x_codec_probe(struct platform_device *pdev)
 	wcd->sdev = to_slim_device(data->dev);
 	mutex_init(&wcd->sysclk_mutex);
 	mutex_init(&wcd->micb_lock);
+	mutex_init(&wcd->mclk_lock);
 	wcd->common.dev = dev->parent;
 	wcd->common.max_bias = 4;
 

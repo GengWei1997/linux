@@ -1173,11 +1173,43 @@ static void wcd_correct_swch_plug(struct work_struct *work)
 	/* Mask ADC COMPLETE interrupt */
 	disable_irq_nosync(mbhc->intr_ids->mbhc_hs_ins_intr);
 
+	/*
+	 * Ground the headphone outputs before the cross connection check.
+	 * The check looks for one channel sitting well above the other, which
+	 * only shows up when both nodes have a path to ground.
+	 *
+	 * wcd_mbhc_adc_detect_plug_type() ungrounds them before it hands the
+	 * plug over to this work, and they are only grounded again at the very
+	 * end of it, so for the whole classification they float and the
+	 * pull-up current drives both to the same high voltage.  The check
+	 * reads that as a ground/mic swap, reports the plug as a line output
+	 * and leaves both jack pins off.  A cold start happens to reach this
+	 * point with them still grounded, which is why the same headset is
+	 * detected correctly there.
+	 */
+	if (mbhc->mbhc_cb->hph_pull_down_ctrl)
+		mbhc->mbhc_cb->hph_pull_down_ctrl(component, true);
+
 	/* Check for cross connection */
 	do {
 		cross_conn = wcd_check_cross_conn(mbhc);
 		try++;
 	} while (try < mbhc->swap_thr);
+
+	/*
+	 * The impedance ramp reads nodes that float unless the codec's analog
+	 * bias is up.  A plug can arrive while no stream is running, in which
+	 * case nothing has powered it, so hold it for the rest of the
+	 * classification instead of letting the codec decide when it is
+	 * needed.
+	 *
+	 * This has to happen after the cross connection check: that one wants
+	 * the headphone nodes to be pulled to MICBIAS through a swapped plug,
+	 * and once the receive bias is powered they sit at the supply level on
+	 * both channels instead, so every plug would look like a swap.
+	 */
+	if (mbhc->mbhc_cb->mbhc_bias_hold)
+		mbhc->mbhc_cb->mbhc_bias_hold(component, true);
 
 	if (cross_conn > 0) {
 		plug_type = MBHC_PLUG_TYPE_GND_MIC_SWAP;
@@ -1317,6 +1349,9 @@ exit:
 
 	if (mbhc->mbhc_cb->hph_pull_down_ctrl)
 		mbhc->mbhc_cb->hph_pull_down_ctrl(component, true);
+
+	if (mbhc->mbhc_cb->mbhc_bias_hold)
+		mbhc->mbhc_cb->mbhc_bias_hold(component, false);
 
 	pm_runtime_put_autosuspend(component->dev);
 }

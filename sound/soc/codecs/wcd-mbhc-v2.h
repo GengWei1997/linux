@@ -265,6 +265,8 @@ struct wcd_mbhc_cb {
 	bool (*mbhc_get_moisture_status)(struct snd_soc_component *component);
 	void (*mbhc_moisture_polling_ctrl)(struct snd_soc_component *component, bool enable);
 	void (*mbhc_moisture_detect_en)(struct snd_soc_component *component, bool enable);
+	/* Optional: hold the bias for the duration of the plug classification. */
+	void (*mbhc_bias_hold)(struct snd_soc_component *component, bool enable);
 };
 
 #if IS_ENABLED(CONFIG_SND_SOC_WCD_MBHC)
