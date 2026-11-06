@@ -29901,6 +29901,7 @@ M:	GengWei1997 <gw19970326@gmail.com>
 L:	linux-arm-msm@vger.kernel.org
 S:	Maintained
 F:	arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+F:	arch/arm64/configs/sm8150-xiaomi-raphael.config
 
 XILINX AMS DRIVER
 M:	Sai Krishna Potthuri <sai.krishna.potthuri@amd.com>
