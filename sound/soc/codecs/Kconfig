@@ -2297,6 +2297,16 @@ config SND_SOC_TFA9879
 	tristate "NXP Semiconductors TFA9879 amplifier"
 	depends on I2C
 
+config SND_SOC_TFA9874
+	tristate "NXP/Goodix TFA9874 (TFA2) amplifier"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Enable support for the NXP (now Goodix) TFA9874 (TFA2 family)
+	  speaker amplifier.
+	  Note that the driver currently bypasses the built-in "CoolFlux DSP"
+	  and does not support (hardware) volume control.
+
 config SND_SOC_TFA989X
 	tristate "NXP/Goodix TFA989X (TFA1) amplifiers"
 	depends on I2C
