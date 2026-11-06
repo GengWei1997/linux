@@ -12,6 +12,14 @@
 
 #include "pdr_internal.h"
 
+/*
+ * A PD that has just come up may not answer the listener registration yet.
+ * Treating that as a permanent failure makes every client of the domain drop
+ * its resources, so retry for a bounded amount of time instead.
+ */
+#define PDR_REGISTER_RETRY_MS	200
+#define PDR_REGISTER_RETRY_MAX	15
+
 struct pdr_service {
 	char service_name[SERVREG_NAME_LENGTH + 1];
 	char service_path[SERVREG_NAME_LENGTH + 1];
@@ -28,6 +36,8 @@ struct pdr_service {
 	bool need_notifier_remove;
 	bool need_locator_lookup;
 	bool service_connected;
+
+	unsigned int register_retries;
 
 	struct list_head node;
 };
@@ -53,7 +63,7 @@ struct pdr_handle {
 	bool locator_init_complete;
 
 	struct work_struct locator_work;
-	struct work_struct notifier_work;
+	struct delayed_work notifier_work;
 	struct work_struct indack_work;
 
 	struct workqueue_struct *notifier_wq;
@@ -140,8 +150,17 @@ static int pdr_register_listener(struct pdr_handle *pdr,
 
 	ret = qmi_txn_wait(&txn, 5 * HZ);
 	if (ret < 0) {
-		pr_err("PDR: %s register listener txn wait failed: %d\n",
-		       pds->service_path, ret);
+		/*
+		 * A timeout is not an error on its own: the domain has just
+		 * come up and may not answer yet, in which case the caller
+		 * retries.  Only report the failures that are final.
+		 */
+		if (ret == -ETIMEDOUT)
+			pr_debug("PDR: %s register listener timed out\n",
+				 pds->service_path);
+		else
+			pr_err("PDR: %s register listener txn wait failed: %d\n",
+			       pds->service_path, ret);
 		return ret;
 	}
 
@@ -158,9 +177,11 @@ static int pdr_register_listener(struct pdr_handle *pdr,
 
 static void pdr_notifier_work(struct work_struct *work)
 {
-	struct pdr_handle *pdr = container_of(work, struct pdr_handle,
+	struct pdr_handle *pdr = container_of(to_delayed_work(work),
+					      struct pdr_handle,
 					      notifier_work);
 	struct pdr_service *pds;
+	bool retry = false;
 	int ret;
 
 	mutex_lock(&pdr->list_lock);
@@ -171,6 +192,19 @@ static void pdr_notifier_work(struct work_struct *work)
 
 			pds->need_notifier_register = false;
 			ret = pdr_register_listener(pdr, pds, true);
+			if (ret == -ETIMEDOUT &&
+			    pds->register_retries++ < PDR_REGISTER_RETRY_MAX) {
+				/*
+				 * The remote PD is up but has not answered the
+				 * registration yet.  Reporting it as down here
+				 * makes every client drop its resources, so
+				 * retry instead of failing the domain.
+				 */
+				pds->need_notifier_register = true;
+				retry = true;
+				continue;
+			}
+			pds->register_retries = 0;
 			if (ret < 0)
 				pds->state = SERVREG_SERVICE_STATE_DOWN;
 		} else {
@@ -186,6 +220,10 @@ static void pdr_notifier_work(struct work_struct *work)
 		mutex_unlock(&pdr->status_lock);
 	}
 	mutex_unlock(&pdr->list_lock);
+
+	if (retry)
+		queue_delayed_work(pdr->notifier_wq, &pdr->notifier_work,
+				   msecs_to_jiffies(PDR_REGISTER_RETRY_MS));
 }
 
 static int pdr_notifier_new_server(struct qmi_handle *qmi,
@@ -201,10 +239,11 @@ static int pdr_notifier_new_server(struct qmi_handle *qmi,
 		    pds->instance == svc->instance) {
 			pds->service_connected = true;
 			pds->need_notifier_register = true;
+			pds->register_retries = 0;
 			pds->addr.sq_family = AF_QIPCRTR;
 			pds->addr.sq_node = svc->node;
 			pds->addr.sq_port = svc->port;
-			queue_work(pdr->notifier_wq, &pdr->notifier_work);
+			queue_delayed_work(pdr->notifier_wq, &pdr->notifier_work, 0);
 		}
 	}
 	mutex_unlock(&pdr->list_lock);
@@ -225,9 +264,10 @@ static void pdr_notifier_del_server(struct qmi_handle *qmi,
 		    pds->instance == svc->instance) {
 			pds->service_connected = false;
 			pds->need_notifier_remove = true;
+			pds->register_retries = 0;
 			pds->addr.sq_node = 0;
 			pds->addr.sq_port = 0;
-			queue_work(pdr->notifier_wq, &pdr->notifier_work);
+			queue_delayed_work(pdr->notifier_wq, &pdr->notifier_work, 0);
 		}
 	}
 	mutex_unlock(&pdr->list_lock);
@@ -659,7 +699,7 @@ struct pdr_handle *pdr_handle_alloc(void (*status)(int state,
 	INIT_LIST_HEAD(&pdr->indack_list);
 
 	INIT_WORK(&pdr->locator_work, pdr_locator_work);
-	INIT_WORK(&pdr->notifier_work, pdr_notifier_work);
+	INIT_DELAYED_WORK(&pdr->notifier_work, pdr_notifier_work);
 	INIT_WORK(&pdr->indack_work, pdr_indack_work);
 
 	pdr->notifier_wq = create_singlethread_workqueue("pdr_notifier_wq");
@@ -723,7 +763,7 @@ void pdr_handle_release(struct pdr_handle *pdr)
 	mutex_unlock(&pdr->list_lock);
 
 	cancel_work_sync(&pdr->locator_work);
-	cancel_work_sync(&pdr->notifier_work);
+	cancel_delayed_work_sync(&pdr->notifier_work);
 	cancel_work_sync(&pdr->indack_work);
 
 	destroy_workqueue(pdr->notifier_wq);
