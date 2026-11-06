@@ -168,6 +168,7 @@ struct qcom_slim_ngd_ctrl {
 	void *notifier;
 	struct pdr_handle *pdr;
 	enum qcom_slim_ngd_state state;
+	bool registered;
 	dma_addr_t rx_phys_base;
 	dma_addr_t tx_phys_base;
 	void *rx_base;
@@ -1328,7 +1329,23 @@ static int qcom_slim_ngd_runtime_resume(struct device *dev)
 static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
 {
 	if (enable) {
-		int ret = qcom_slim_qmi_init(ctrl, false);
+		int ret;
+
+		/*
+		 * Both the PDR state notifier and the LPASS SSR notifier can
+		 * schedule the up worker, and pm_runtime_resume() drives the
+		 * controller up as well, so this runs more than once per boot
+		 * without a matching qcom_slim_ngd_down().  Nothing below is
+		 * idempotent: qmi init would leak the previous handle, the
+		 * runtime PM put would underflow, and slim_register_controller()
+		 * allocates a fresh id and registers the same client devices
+		 * again, which fails with -EEXIST and leaves the bus half set
+		 * up.
+		 */
+		if (ctrl->registered)
+			return 0;
+
+		ret = qcom_slim_qmi_init(ctrl, false);
 
 		if (ret) {
 			dev_err(ctrl->dev, "qmi init fail, ret:%d, state:%d\n",
@@ -1352,10 +1369,16 @@ static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
 			return ret;
 		}
 
+		ctrl->registered = true;
+
 		dev_info(ctrl->dev, "SLIM controller Registered\n");
 	} else {
 		qcom_slim_qmi_exit(ctrl);
+		if (!ctrl->registered)
+			return 0;
+
 		slim_unregister_controller(&ctrl->ctrl);
+		ctrl->registered = false;
 	}
 
 	return 0;
