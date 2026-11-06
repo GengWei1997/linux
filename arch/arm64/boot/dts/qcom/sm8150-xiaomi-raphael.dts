@@ -18,6 +18,8 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
 #include "sm8150.dtsi"
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
@@ -745,6 +747,41 @@
 		drive-strength = <2>;
 		bias-pull-down;
 	};
+
+	/*
+	 * WCD9340 interrupt line, CODEC_INT1_N on TLMM 123.  The vendor tree
+	 * pulls it down and leaves it as an input, which matches the codec
+	 * driving it low when it has something to report.
+	 */
+	wcd_intr_default: wcd-intr-default-state {
+		pins = "gpio123";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+		input-enable;
+	};
+
+	/*
+	 * TFA9874 control lines.  GPIO59 is SPKR_PA_RST, wired straight to
+	 * the amplifier's RST pin; GPIO141 is SPKR_INT.  The reset line is
+	 * driven low here so that the amplifier is out of reset as soon as
+	 * pinctrl is applied, and the driver pulses it again at probe time.
+	 */
+	spkr_int_default: spkr-int-default-state {
+		pins = "gpio141";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	spkr_rst_default: spkr-rst-default-state {
+		pins = "gpio59";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
 };
 
 /*
@@ -1149,5 +1186,207 @@
 	cont_splash_mem: memory@9c000000 {
 		reg = <0x0 0x9c000000 0x0 0x02400000>;
 		no-map;
+	};
+};
+
+/*
+ * Audio.
+ *
+ * The WCD9340 hangs off the SLIMbus instance the ADSP masters; it drives
+ * the earpiece, the headphones and both microphone inputs.  The speaker is
+ * a TFA9874 class-D amplifier on the quaternary MI2S, controlled over I2C1
+ * (the vendor's SE1) with its RST line on TLMM 59.
+ */
+&slimbam {
+	status = "okay";
+};
+
+&slim {
+	status = "okay";
+
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&lpass_slimbus_active>;
+	pinctrl-1 = <&lpass_slimbus_sleep>;
+
+	slim@1 {
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		wcd9340_ifd: ifd@0,0 {
+			compatible = "slim217,250";
+			reg = <0 0>;
+		};
+
+		wcd9340: codec@1,0 {
+			compatible = "slim217,250";
+			reg = <1 0>;
+			slim-ifc-dev = <&wcd9340_ifd>;
+
+			#sound-dai-cells = <1>;
+
+			interrupts-extended = <&tlmm 123 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			clock-names = "extclk";
+			clocks = <&rpmhcc RPMH_LN_BB_CLK2>;
+
+			#clock-cells = <0>;
+			clock-frequency = <9600000>;
+			clock-output-names = "mclk";
+
+			pinctrl-names = "default";
+			pinctrl-0 = <&wcd_intr_default>;
+
+			reset-gpios = <&tlmm 143 GPIO_ACTIVE_HIGH>;
+
+			vdd-buck-supply = <&vreg_s4a_1p8>;
+			vdd-buck-sido-supply = <&vreg_s4a_1p8>;
+			vdd-tx-supply = <&vreg_s4a_1p8>;
+			vdd-rx-supply = <&vreg_s4a_1p8>;
+			vdd-io-supply = <&vreg_s4a_1p8>;
+
+			qcom,micbias1-microvolt = <2700000>;
+			qcom,micbias2-microvolt = <1800000>;
+			qcom,micbias3-microvolt = <2700000>;
+			qcom,micbias4-microvolt = <2700000>;
+
+			qcom,mbhc-buttons-vthreshold-microvolt =
+				<75000 150000 237000 500000
+				 500000 500000 500000 500000>;
+		};
+	};
+};
+
+&i2c1 {
+	status = "okay";
+
+	clock-frequency = <400000>;
+
+	tfa9874: amplifier@34 {
+		compatible = "nxp,tfa9874";
+		reg = <0x34>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&spkr_int_default>, <&spkr_rst_default>;
+
+		reset-gpios = <&tlmm 59 GPIO_ACTIVE_HIGH>;
+
+		#sound-dai-cells = <0>;
+	};
+};
+
+&q6afedai {
+	dai@22 {
+		reg = <QUATERNARY_MI2S_RX>;
+		qcom,sd-lines = <0>;
+	};
+};
+
+&q6asmdai {
+	dai@0 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
+	};
+
+	dai@1 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
+	};
+
+	dai@2 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
+	};
+
+	dai@3 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>;
+	};
+};
+
+&sound {
+	compatible = "qcom,sm8150-sndcard";
+	model = "Xiaomi Redmi K20 Pro";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&qua_mi2s_active>;
+
+	audio-routing =
+		"RX_BIAS", "MCLK",
+		"AMIC1", "MIC BIAS1",
+		"AMIC2", "MIC BIAS2",
+		"AMIC3", "MIC BIAS3",
+		"Headphone Jack", "HPHL",
+		"Headphone Jack", "HPHR";
+
+	mm1-dai-link {
+		link-name = "MultiMedia1";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+		};
+	};
+
+	mm2-dai-link {
+		link-name = "MultiMedia2";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+		};
+	};
+
+	mm3-dai-link {
+		link-name = "MultiMedia3";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+		};
+	};
+
+	mm4-dai-link {
+		link-name = "MultiMedia4";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
+		};
+	};
+
+	slim-playback-dai-link {
+		link-name = "SLIM Playback";
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_RX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9340 0>;
+		};
+	};
+
+	slim-capture-dai-link {
+		link-name = "SLIM Capture";
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_TX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9340 1>;
+		};
+	};
+
+	spk-dai-link {
+		link-name = "TFA9874 Playback";
+		cpu {
+			sound-dai = <&q6afedai QUATERNARY_MI2S_RX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&tfa9874>;
+		};
 	};
 };
