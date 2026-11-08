@@ -20,6 +20,7 @@
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <dt-bindings/sound/qcom,q6asm.h>
+#include <dt-bindings/usb/pd.h>
 #include "sm8150.dtsi"
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
@@ -954,15 +955,21 @@
 };
 
 /*
- * USB.  A 2.0 high-speed peripheral port is what the debug console and the
- * network link use.  The USB3/DP combo PHY needs a module that is not
- * available in the initramfs, and leaving it in the DWC3 PHY list makes the
- * controller defer forever, so only the HS PHY is wired up.
+ * USB.  The board wires up only the 2.0 high-speed PHY: the USB3/DP combo
+ * PHY is not populated for this product, so the port tops out at 480 Mbps
+ * and has no DisplayPort alt-mode.  Leaving the combo PHY in the DWC3 PHY
+ * list makes the controller defer forever, so only the HS PHY is listed.
  *
  * Without the combo PHY there is no PIPE clock, which is what the controller
  * clocks its device-side endpoint commands from; leaving it to the QMP PHY
  * makes every DEPCFG command time out and the gadget never enumerates.  Let
  * the wrapper take the UTMI clock as the PIPE clock instead.
+ *
+ * The port is dual-role.  The PM8150B Type-C controller watches CC and
+ * drives the role switch, so a charger or a PC leaves the port in device
+ * mode (which is what the debug console and the network link need) while a
+ * dock flips it to host mode.  The role switch lives on the DWC3 node, and
+ * tcpm reaches it through the graph link from the connector below.
  */
 &usb_1 {
 	qcom,select-utmi-as-pipe-clk;
@@ -971,10 +978,19 @@
 };
 
 &usb_1_dwc3 {
-	dr_mode = "peripheral";
+	dr_mode = "otg";
 	maximum-speed = "high-speed";
 	phys = <&usb_1_hsphy>;
 	phy-names = "usb2-phy";
+	usb-role-switch;
+};
+
+/*
+ * The HS PHY's port links the controller to the Type-C connector so that
+ * tcpm can find the role switch through the graph.
+ */
+&usb_1_dwc3_hs {
+	remote-endpoint = <&pm8150b_hs_in>;
 };
 
 &usb_1_hsphy {
@@ -994,6 +1010,86 @@
 
 	vdda-phy-supply = <&vreg_l5a_0p875>;
 	vdda-pll-supply = <&vreg_l12a_1p8>;
+};
+
+/*
+ * PM8150B Type-C port controller.
+ *
+ * The port is a dual-role port and the CC pins are wired to the PMIC, not
+ * to a GPIO: this is a Type-C socket with no ID pin, so the old extcon
+ * cable-detection model does not apply.  tcpm runs the CC state machine on
+ * top of the PM8150B port block and drives the DWC3 role switch through the
+ * graph link below, which is what makes the port follow whatever is
+ * plugged in.
+ *
+ * "sink" is the preferred role, so a charger or a PC keeps the port in
+ * device mode and the gadget (the debug console and the network link) comes
+ * up as it always has.  A dock's upstream port is a sink, so when one is
+ * attached this tries sink first, sees nothing, flips to source and comes
+ * up as a USB 2.0 host with the dock's devices behind it.
+ *
+ * self-powered because the phone runs off its own battery; the VBUS
+ * regulator is only enabled while the port actually acts as a source.
+ */
+&pm8150b_typec {
+	status = "okay";
+
+	vdd-pdphy-supply = <&vreg_l2a_3p1>;
+
+	connector {
+		compatible = "usb-c-connector";
+
+		power-role = "dual";
+		data-role = "dual";
+		try-power-role = "sink";
+		self-powered;
+
+		/*
+		 * tcpm refuses a sink-capable port that does not state how
+		 * much power it draws as a sink, so this is not optional
+		 * once sink-pdos is given.
+		 */
+		op-sink-microwatt = <10000000>;
+
+		vbus-supply = <&pm8150b_vbus>;
+
+		source-pdos = <PDO_FIXED(5000, 3000,
+					 PDO_FIXED_DUAL_ROLE |
+					 PDO_FIXED_USB_COMM |
+					 PDO_FIXED_DATA_SWAP)>;
+
+		sink-pdos = <PDO_FIXED(5000, 3000,
+				       PDO_FIXED_DUAL_ROLE |
+				       PDO_FIXED_USB_COMM |
+				       PDO_FIXED_DATA_SWAP)
+				       PDO_VAR(5000, 9000, 3000)>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				pm8150b_hs_in: endpoint {
+					remote-endpoint = <&usb_1_dwc3_hs>;
+				};
+			};
+		};
+	};
+};
+
+/*
+ * The PM8150B's own OTG boost, which is what feeds VBUS to the dock while
+ * the port is a host.  The board also has an external boost on PM8150B
+ * gpio12, but the vendor leaves that one disabled on this product, so the
+ * internal supply is the one described.
+ */
+&pm8150b_vbus {
+	regulator-min-microamp = <500000>;
+	regulator-max-microamp = <3000000>;
+
+	status = "okay";
 };
 
 /*
