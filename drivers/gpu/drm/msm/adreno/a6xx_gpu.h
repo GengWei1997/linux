@@ -56,6 +56,13 @@ struct a6xx_info {
 	u32 gmu_cgc_mode;
 	u32 prim_fifo_threshold;
 	const struct a6xx_bcm *bcms;
+	/**
+	 * @va_pad: VA padding granularity required by this GPU, 0 if none
+	 *
+	 * A640 needs every allocation aligned and padded to 64K because the
+	 * CCU over-fetches up to that granularity past the end of a buffer.
+	 */
+	u64 va_pad;
 };
 
 struct a6xx_gpu {

@@ -2378,15 +2378,30 @@ a6xx_create_vm(struct msm_gpu *gpu, struct platform_device *pdev)
 static struct drm_gpuvm *
 a6xx_create_private_vm(struct msm_gpu *gpu, bool kernel_managed)
 {
+	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
 	struct msm_mmu *mmu;
+	struct drm_gpuvm *vm;
 
 	mmu = msm_iommu_pagetable_create(to_msm_vm(gpu->vm)->mmu, kernel_managed);
 
 	if (IS_ERR(mmu))
 		return ERR_CAST(mmu);
 
-	return msm_gem_vm_create(gpu->dev, mmu, "gpu", ADRENO_VM_START,
-				 adreno_private_vm_size(gpu), kernel_managed);
+	vm = msm_gem_vm_create(gpu->dev, mmu, "gpu", ADRENO_VM_START,
+			       adreno_private_vm_size(gpu), kernel_managed);
+
+	if (IS_ERR(vm))
+		return vm;
+
+	/*
+	 * The kernel allocates the iovas for a kernel managed VM, so this is
+	 * where the padding can be reserved.  Userspace managed VMs choose
+	 * their own addresses and do the padding themselves.
+	 */
+	if (kernel_managed && adreno_gpu->info->a6xx->va_pad)
+		msm_gem_vm_set_va_pad(vm, adreno_gpu->info->a6xx->va_pad);
+
+	return vm;
 }
 
 static uint32_t a6xx_get_rptr(struct msm_gpu *gpu, struct msm_ringbuffer *ring)

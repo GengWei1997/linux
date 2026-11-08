@@ -138,6 +138,25 @@ struct msm_gem_vm {
 	bool managed;
 
 	/**
+	 * @va_pad: VA allocation padding granularity, zero if not required
+	 *
+	 * Some GPUs (A640) require every allocation to be aligned to, and
+	 * padded out to, a coarser granularity than a page.  The padding is
+	 * not part of the object, but it is mapped so that speculative reads
+	 * that run past the end of a buffer still hit valid memory.
+	 *
+	 * Only used for kernel managed VMs.
+	 */
+	u64 va_pad;
+
+	/**
+	 * @pad_sgt: Shared read-only zero page backing the @va_pad gaps
+	 *
+	 * Lazily allocated on the first padded mapping, freed with the VM.
+	 */
+	struct sg_table *pad_sgt;
+
+	/**
 	 * @unusable: True if the VM has turned unusable because something
 	 * bad happened during an asynchronous request.
 	 *
@@ -162,6 +181,7 @@ msm_gem_vm_create(struct drm_device *drm, struct msm_mmu *mmu, const char *name,
 
 void msm_gem_vm_close(struct drm_gpuvm *gpuvm);
 void msm_gem_vm_unusable(struct drm_gpuvm *gpuvm);
+void msm_gem_vm_set_va_pad(struct drm_gpuvm *gpuvm, u64 va_pad);
 
 struct msm_fence_context;
 

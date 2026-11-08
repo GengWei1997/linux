@@ -985,6 +985,13 @@ static const struct adreno_info a6xx_gpus[] = {
 			.protect = &a630_protect,
 			.gmu_cgc_mode = 0x00020202,
 			.prim_fifo_threshold = 0x00180000,
+			/*
+			 * The CCU over-fetches past the end of a buffer, so
+			 * every allocation has to be padded out to 64K to keep
+			 * those reads inside a mapped range.  Only A640 needs
+			 * this; downstream KGSL models it as va_padding.
+			 */
+			.va_pad = SZ_64K,
 		},
 		.speedbins = ADRENO_SPEEDBINS(
 			{ 0, 0 },

@@ -166,6 +166,11 @@ msm_gem_vm_free(struct drm_gpuvm *gpuvm)
 	dma_fence_put(vm->last_fence);
 	put_pid(vm->pid);
 	kfree(vm->log);
+	if (vm->pad_sgt) {
+		__free_page(sg_page(vm->pad_sgt->sgl));
+		sg_free_table(vm->pad_sgt);
+		kfree(vm->pad_sgt);
+	}
 	kfree_rcu(vm, rcu);
 }
 
@@ -264,6 +269,94 @@ vm_map_op(struct msm_gem_vm *vm, const struct msm_vm_map_op *op)
 				   op->range, op->prot);
 }
 
+/*
+ * Map the @va_pad tail gap of @vma to the VM's shared read-only zero page.
+ *
+ * The gap is reserved by the VA allocator (see msm_gem_vma_new()) but it is
+ * not part of the object, so it would otherwise have no translation at all.
+ * A640's CCU speculatively reads up to its padding granularity past the end
+ * of a buffer; without this mapping those reads land on an unmapped iova and
+ * the SMMU raises
+ *
+ *   *** gpu fault: iova=... dir=READ type=TRANSLATION source=CCU
+ *
+ * Downstream KGSL does the same thing via kgsl_memdesc->pad_to plus a shared
+ * guard page.
+ */
+static int msm_gem_vma_map_pad(struct msm_gem_vm *vm, struct drm_gpuva *vma)
+{
+	u64 start = vma->va.addr + vma->va.range;
+	u64 len = ALIGN(vma->va.addr + vma->va.range, vm->va_pad) - start;
+	u64 off;
+	int ret;
+
+	if (!len)
+		return 0;
+
+	if (!vm->pad_sgt) {
+		struct page *page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		struct sg_table *sgt;
+
+		if (!page)
+			return -ENOMEM;
+
+		sgt = kmalloc_obj(*sgt);
+		if (!sgt) {
+			__free_page(page);
+			return -ENOMEM;
+		}
+
+		if (sg_alloc_table(sgt, 1, GFP_KERNEL)) {
+			kfree(sgt);
+			__free_page(page);
+			return -ENOMEM;
+		}
+
+		sg_set_page(sgt->sgl, page, PAGE_SIZE, 0);
+		vm->pad_sgt = sgt;
+	}
+
+	/*
+	 * The same zero page backs every pad, so the sg table only covers one
+	 * page while @len can be much larger.  Map it page by page.
+	 */
+	for (off = 0; off < len; off += PAGE_SIZE) {
+		ret = vm_map_op(vm, &(struct msm_vm_map_op){
+			.iova = start + off,
+			.range = min_t(u64, PAGE_SIZE, len - off),
+			.offset = 0,
+			.sgt = vm->pad_sgt,
+			.prot = IOMMU_READ,
+		});
+		if (ret)
+			goto err_unmap;
+	}
+
+	return 0;
+
+err_unmap:
+	DRM_DEV_ERROR(vm->base.drm->dev,
+		      "failed to map %#llx byte VA pad at %#llx: %pe\n",
+		      len, start, ERR_PTR(ret));
+
+	while (off) {
+		off -= PAGE_SIZE;
+		vm->mmu->funcs->unmap(vm->mmu, start + off,
+				      min_t(u64, PAGE_SIZE, len - off));
+	}
+
+	return ret;
+}
+
+static void msm_gem_vma_unmap_pad(struct msm_gem_vm *vm, struct drm_gpuva *vma)
+{
+	u64 start = vma->va.addr + vma->va.range;
+	u64 len = ALIGN(vma->va.addr + vma->va.range, vm->va_pad) - start;
+
+	if (len)
+		vm->mmu->funcs->unmap(vm->mmu, start, len);
+}
+
 /* Actually unmap memory for the vma */
 void msm_gem_vma_unmap(struct drm_gpuva *vma, const char *reason)
 {
@@ -287,6 +380,9 @@ void msm_gem_vma_unmap(struct drm_gpuva *vma, const char *reason)
 		.range = vma->va.range,
 		.reason = reason,
 	});
+
+	if (vm->va_pad)
+		msm_gem_vma_unmap_pad(vm, vma);
 
 	if (!vm->managed)
 		mutex_unlock(&vm->mmu_lock);
@@ -332,11 +428,17 @@ msm_gem_vma_map(struct drm_gpuva *vma, int prot, struct sg_table *sgt)
 		.prot = prot,
 	});
 
+	if (!ret && vm->va_pad)
+		ret = msm_gem_vma_map_pad(vm, vma);
+
 	if (!vm->managed)
 		mutex_unlock(&vm->mmu_lock);
 
-	if (ret)
+	if (ret) {
+		if (vm->va_pad)
+			msm_gem_vma_unmap_pad(vm, vma);
 		msm_vma->mapped = false;
+	}
 
 	return ret;
 }
@@ -386,11 +488,23 @@ msm_gem_vma_new(struct drm_gpuvm *gpuvm, struct drm_gem_object *obj,
 		return ERR_PTR(-ENOMEM);
 
 	if (vm->managed) {
+		u64 size = obj->size;
+
 		BUG_ON(offset != 0);
 		BUG_ON(!obj);  /* NULL mappings not valid for kernel managed VM */
+
+		/*
+		 * Some GPUs (A640) over-fetch past the end of a buffer and
+		 * need the VA range padded and aligned to a coarse boundary.
+		 * Reserve the padded size so that the tail gap is part of this
+		 * allocation and cannot be handed to somebody else.
+		 */
+		if (vm->va_pad)
+			size = ALIGN(size, vm->va_pad);
+
 		ret = drm_mm_insert_node_in_range(&vm->mm, &vma->node,
-						obj->size, PAGE_SIZE, 0,
-						range_start, range_end, 0);
+						size, max_t(u64, vm->va_pad, PAGE_SIZE),
+						0, range_start, range_end, 0);
 
 		if (ret)
 			goto err_free_vma;
@@ -892,6 +1006,22 @@ err_free_dummy:
 err_free_vm:
 	kfree(vm);
 	return ERR_PTR(ret);
+}
+
+/**
+ * msm_gem_vm_set_va_pad() - Set the VA padding granularity for a VM
+ * @gpuvm: the VM to configure
+ * @va_pad: padding granularity, zero to disable
+ *
+ * Must be called before any VMA is created, i.e. right after
+ * msm_gem_vm_create().  Only meaningful for kernel managed VMs, where the
+ * kernel allocates the iovas and can therefore reserve the padding.
+ */
+void msm_gem_vm_set_va_pad(struct drm_gpuvm *gpuvm, u64 va_pad)
+{
+	struct msm_gem_vm *vm = to_msm_vm(gpuvm);
+
+	vm->va_pad = va_pad;
 }
 
 /**
