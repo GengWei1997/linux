@@ -318,8 +318,6 @@ struct fastrpc_channel_ctx {
 	struct fastrpc_device *secure_fdevice;
 	struct fastrpc_device *fdevice;
 	struct fastrpc_buf *remote_heap;
-	phys_addr_t remote_heap_addr;
-	u64 remote_heap_size;
 	struct list_head invoke_interrupted_mmaps;
 	bool secure;
 	bool unsigned_support;
@@ -2535,6 +2533,14 @@ static const struct of_device_id fastrpc_poll_supported_machines[] __maybe_unuse
 	{},
 };
 
+/*
+ * The TrustZone firmware accepts the assignment of the reserved remote heap
+ * only once per boot.  Later attempts are rejected with -EINVAL although the
+ * hypervisor keeps the original assignment, so remember that the heap is
+ * already handed to the remote and skip the redundant call on re-probe.
+ */
+static bool fastrpc_remote_heap_assigned;
+
 static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 {
 	struct device *rdev = &rpdev->dev;
@@ -2586,27 +2592,33 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 		struct resource res;
 		u64 src_perms;
 
+		/*
+		 * The TrustZone firmware accepts the assignment of the reserved
+		 * remote heap only once per boot.  Every later attempt, which is
+		 * what the probe that follows a remote restart issues, is
+		 * rejected with -EINVAL even though the hypervisor kept the
+		 * original assignment.  The heap stays usable across the
+		 * restart, so skip the redundant call entirely instead of
+		 * provoking the rejection on every recovery.
+		 */
 		err = of_reserved_mem_region_to_resource(rdev->of_node, 0, &res);
-		if (!err && data->vmcount) {
+		if (!err && data->vmcount && !fastrpc_remote_heap_assigned) {
 			src_perms = BIT(QCOM_SCM_VMID_HLOS);
 
 			err = qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
 				    data->vmperms, data->vmcount);
 			if (err == -EINVAL) {
 				/*
-				 * Some firmware keeps the remote heap assigned
-				 * across remote restarts and rejects assigning
-				 * what it already owns.  The heap stays usable,
-				 * so continue probing instead of leaving the
-				 * FastRPC node dead after a recovery.
+				 * Something else, for instance a previous boot
+				 * stage, already handed the region to the
+				 * remote.  That is a usable state, keep going.
 				 */
-				dev_warn(rdev, "remote heap already assigned\n");
+				dev_dbg(rdev, "remote heap already assigned\n");
 			} else if (err) {
 				goto err_free_data;
-			} else {
-				data->remote_heap_addr = res.start;
-				data->remote_heap_size = resource_size(&res);
 			}
+
+			fastrpc_remote_heap_assigned = true;
 		}
 
 	}
@@ -2712,26 +2724,13 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 	if (cctx->remote_heap)
 		fastrpc_buf_free(cctx->remote_heap);
 
-	if (cctx->remote_heap_size && cctx->vmcount) {
-		u64 src_perms = 0;
-		struct qcom_scm_vmperm dst_perms;
-		int i, err;
-
-		for (i = 0; i < cctx->vmcount; i++)
-			src_perms |= BIT(cctx->vmperms[i].vmid);
-
-		dst_perms.vmid = QCOM_SCM_VMID_HLOS;
-		dst_perms.perm = QCOM_SCM_PERM_RWX;
-
-		err = qcom_scm_assign_mem(cctx->remote_heap_addr,
-					  cctx->remote_heap_size, &src_perms,
-					  &dst_perms, 1);
-		if (err)
-			dev_err(&rpdev->dev,
-				"Failed to assign memory back to HLOS: addr %pa size %#llx err %d\n",
-				&cctx->remote_heap_addr, cctx->remote_heap_size,
-				err);
-	}
+	/*
+	 * The remote heap is not handed back here.  The channel is torn down
+	 * when the remote restarts, and the remote keeps the heap across the
+	 * restart: TrustZone refuses to move a region the remote still owns
+	 * and the next probe reuses the existing assignment.  Handing it back
+	 * would only revoke the access the recovering remote needs.
+	 */
 
 	of_platform_depopulate(&rpdev->dev);
 
