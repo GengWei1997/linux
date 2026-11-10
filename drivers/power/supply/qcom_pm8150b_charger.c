@@ -178,12 +178,22 @@
 #define ALG_ACTIVE			BIT(3)
 
 /*
- * Battery temperature lives in gauge SRAM word 328, which the hardware
- * maps into DMA window 4.  Two bytes per word.
+ * Battery temperature lives in gauge SRAM word 328 and the battery current
+ * in word 320; both are mapped into DMA window 4.  Two bytes per word.
  */
 #define GEN4_FG_DMA4_BASE		0x4800
 #define SRAM_ADDR_OFFSET		0x20
 #define BATT_TEMP_WORD			328
+#define BATT_CURRENT_WORD		320
+
+/*
+ * The gauge stores the battery current as a signed 16-bit word whose scale
+ * is set by the sense resistor: 488282 in the denominator turns the raw
+ * count into microamps, the same pair the vendor driver uses for
+ * IBAT_FINAL.  A positive value means current is flowing into the cell.
+ */
+#define BATT_CURRENT_NUMR		488282
+#define BATT_CURRENT_DENR		1000
 
 /*
  * Lithium cells are damaged by charging outside this range, so charging is
@@ -392,6 +402,8 @@ struct pm8150b_chg {
 	bool			temp_valid;
 	int			temp_bad;	/* out-of-range samples in a row */
 	bool			charge_allowed;
+	int			current_ua;
+	bool			current_valid;
 
 	/*
 	 * D+/D- are shared between the USB gadget and this charger's own
@@ -669,6 +681,31 @@ static int fg_read_temp(struct pm8150b_chg *chg, int *temp)
 		rc = fg_sram_read_word(chg, BATT_TEMP_WORD, &raw);
 		if (!rc) {
 			*temp = sign_extend32(raw, 9) * 100 / 40;
+			return 0;
+		}
+	}
+
+	return rc;
+}
+
+/* Battery current in microamperes, positive while charging. */
+static int fg_read_current_ua(struct pm8150b_chg *chg, int *ua)
+{
+	unsigned int raw;
+	int i, rc;
+
+	/*
+	 * Same arbitration story as the temperature: the DMA window is only
+	 * granted in the gaps between the gauge's own conversions, so retry
+	 * a few times before reporting nothing.  Without this the current
+	 * reads back as zero far more often than it reads back correctly,
+	 * which is worse than an error the caller can cache around.
+	 */
+	for (i = 0; i < 3; i++) {
+		rc = fg_sram_read_word(chg, BATT_CURRENT_WORD, &raw);
+		if (!rc) {
+			*ua = div_s64((s64)sign_extend32(raw, 15) *
+				      BATT_CURRENT_NUMR, BATT_CURRENT_DENR);
 			return 0;
 		}
 	}
@@ -1480,6 +1517,17 @@ static int chg_battery_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CAPACITY:
 		rc = fg_get_soc(chg, &val->intval);
 		break;
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		/*
+		 * Sampled in the background alongside the temperature, for
+		 * the same reason: the gauge's DMA window blocks for longer
+		 * than a property getter is allowed to.
+		 */
+		if (!chg->current_valid)
+			return -EAGAIN;
+		val->intval = chg->current_ua;
+		rc = 0;
+		break;
 	case POWER_SUPPLY_PROP_TEMP:
 		/*
 		 * The gauge's DMA window is slow and racy to reach, so the
@@ -1620,6 +1668,7 @@ static enum power_supply_property chg_battery_props[] = {
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
@@ -1812,6 +1861,7 @@ static void chg_status_work(struct work_struct *work)
 	bool want_cp;
 	unsigned int delay_ms;
 	int status, online, present, capacity, temp;
+	int current_ua;
 
 	if (!chg_usb_online(chg, &online) && online != chg->usb_online) {
 		chg->usb_online = online;
@@ -1862,6 +1912,13 @@ static void chg_status_work(struct work_struct *work)
 	if (!fg_read_temp(chg, &temp) && temp != chg->temp_deci) {
 		chg->temp_deci = temp;
 		chg->temp_valid = true;
+		changed = true;
+	}
+
+	if (!fg_read_current_ua(chg, &current_ua) &&
+	    current_ua != chg->current_ua) {
+		chg->current_ua = current_ua;
+		chg->current_valid = true;
 		changed = true;
 	}
 
