@@ -700,17 +700,27 @@ static int fg_read_current_ua(struct pm8150b_chg *chg, int *ua)
 	 * a few times before reporting nothing.  Without this the current
 	 * reads back as zero far more often than it reads back correctly,
 	 * which is worse than an error the caller can cache around.
+	 *
+	 * A granted window can still hand back an all-zero word before the
+	 * gauge has written its first result, and that decodes to a current
+	 * of exactly zero.  Treat it as "no sample yet" rather than as a
+	 * reading of no current: the two are indistinguishable in the raw
+	 * value, and reporting the plateau as a real 0 A is what made the
+	 * battery look idle while it was not.
 	 */
 	for (i = 0; i < 3; i++) {
 		rc = fg_sram_read_word(chg, BATT_CURRENT_WORD, &raw);
-		if (!rc) {
-			*ua = div_s64((s64)sign_extend32(raw, 15) *
-				      BATT_CURRENT_NUMR, BATT_CURRENT_DENR);
-			return 0;
-		}
+		if (rc < 0)
+			continue;
+		if (!raw)
+			continue;
+
+		*ua = div_s64((s64)sign_extend32(raw, 15) *
+			      BATT_CURRENT_NUMR, BATT_CURRENT_DENR);
+		return 0;
 	}
 
-	return rc;
+	return rc ?: -EAGAIN;
 }
 
 /* ---------------------------- charger --------------------------------- */
@@ -1915,11 +1925,12 @@ static void chg_status_work(struct work_struct *work)
 		changed = true;
 	}
 
-	if (!fg_read_current_ua(chg, &current_ua) &&
-	    current_ua != chg->current_ua) {
-		chg->current_ua = current_ua;
-		chg->current_valid = true;
-		changed = true;
+	if (!fg_read_current_ua(chg, &current_ua)) {
+		if (!chg->current_valid || current_ua != chg->current_ua) {
+			chg->current_ua = current_ua;
+			chg->current_valid = true;
+			changed = true;
+		}
 	}
 
 	/*
