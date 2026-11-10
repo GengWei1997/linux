@@ -584,6 +584,21 @@
 	vdd-1.8-xo-supply = <&vreg_l7a_1p8>;
 	vdd-1.3-rfa-supply = <&vreg_l2c_1p3>;
 	vdd-3.3-ch0-supply = <&vreg_l11c_3p3>;
+	/*
+	 * The WCN3990 has two 3.3 V inputs, ch0 and ch1, and this board ties
+	 * both to the same rail: the vendor tree names only l11c and gives it
+	 * a single qcom,vdd-3.3-ch0-config, with no separate ch1 supply
+	 * anywhere.  ath10k asks for both by name, so leaving ch1 out made
+	 * the bulk fetch fall back to a dummy regulator and complain once per
+	 * boot:
+	 *
+	 *   ath10k_snoc 18800000.wifi: supply vdd-3.3-ch1 not found,
+	 *     using dummy regulator
+	 *
+	 * Pointing ch1 at the same rail reflects the wiring, and the shared
+	 * enable is what the hardware already expects.
+	 */
+	vdd-3.3-ch1-supply = <&vreg_l11c_3p3>;
 };
 
 &pon_pwrkey {
