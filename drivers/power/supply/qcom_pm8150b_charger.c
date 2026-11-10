@@ -190,7 +190,11 @@
  * The gauge stores the battery current as a signed 16-bit word whose scale
  * is set by the sense resistor: 488282 in the denominator turns the raw
  * count into microamps, the same pair the vendor driver uses for
- * IBAT_FINAL.  A positive value means current is flowing into the cell.
+ * IBAT_FINAL.  The sign runs the other way round from the power supply
+ * class: a positive word means current is leaving the cell.  The vendor
+ * code negates it in fg-alg.c before using it as a charge current
+ * (ibatt_avg = -ibatt_avg), and the class interface wants charging
+ * positive, so do the same here.
  */
 #define BATT_CURRENT_NUMR		488282
 #define BATT_CURRENT_DENR		1000
@@ -715,8 +719,13 @@ static int fg_read_current_ua(struct pm8150b_chg *chg, int *ua)
 		if (!raw)
 			continue;
 
-		*ua = div_s64((s64)sign_extend32(raw, 15) *
-			      BATT_CURRENT_NUMR, BATT_CURRENT_DENR);
+		/*
+		 * The gauge counts discharge as positive, the reverse of
+		 * what the power supply class expects, so flip the sign
+		 * once here and keep it flipped everywhere above.
+		 */
+		*ua = -div_s64((s64)sign_extend32(raw, 15) *
+			       BATT_CURRENT_NUMR, BATT_CURRENT_DENR);
 		return 0;
 	}
 
